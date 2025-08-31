@@ -35,7 +35,7 @@ jobs:
 
       - name: Build projects for packing
         run: |
-          for proj in src/*/*.csproj; do
+          for proj in src/*/*/*.csproj; do
             dotnet build "$proj" --configuration Release
           done
           
