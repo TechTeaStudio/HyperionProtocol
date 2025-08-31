@@ -1,0 +1,75 @@
+name: .NET
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-publish:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      # 3. Restore
+      - name: Restore dependencies
+        run: dotnet restore src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln
+
+      # 4. Build
+      - name: Build
+        run: dotnet build src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln --no-restore
+
+      - name: Build projects for packing
+        run: |
+          for proj in src/*/*.csproj; do
+            dotnet build "$proj" --configuration Release
+          done
+          
+      # 5. Test
+      - name: Test
+        run: dotnet test src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln --no-build --verbosity normal
+
+      # 6. Extract versions and pack
+      - name: Extract versions
+        id: get-versions
+        run: |
+          mkdir -p artifacts
+          for proj in src/*/*.csproj; do
+            VERSION=$(grep -Po '(?<=<Version>)[^<]+' "$proj" || true)
+            if [[ -z "$VERSION" ]]; then
+              echo "Skipping $proj - no <Version> tag found"
+              continue
+            fi
+            echo "Packing $proj version $VERSION"
+            dotnet pack "$proj" \
+              --configuration Release \
+              --output ./artifacts \
+              --no-build \
+              /p:PackageVersion=$VERSION
+          done
+
+      # 7. Push all NuGet packages
+      - name: Push all NuGet packages
+        run: |
+          for pkg in ./artifacts/*.nupkg; do
+            echo "Pushing $pkg"
+            dotnet nuget push "$pkg" \
+              --source https://api.nuget.org/v3/index.json \
+              --api-key ${{ secrets.NUGET_API_KEY }} \
+              --skip-duplicate
+          done
+

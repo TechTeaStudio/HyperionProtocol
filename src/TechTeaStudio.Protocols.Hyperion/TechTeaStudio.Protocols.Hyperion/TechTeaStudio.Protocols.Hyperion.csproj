@@ -1,0 +1,40 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>TechTeaStudio.Protocols.Hyperion</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Ronald Ryan</Authors>
+    <Company>Tech Tea Studio</Company>
+    <Description>Base protocol for Hyperion Omni Client.</Description>
+    <RepositoryUrl>https://github.com/TechTeaStudio/HyperionProtocol</RepositoryUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageTags>Network protocol client-server TechTeaStudio</PackageTags>
+    <Copyright>Copyright © Tech Tea Studio 2025</Copyright>
+
+    <PackageReleaseNotes>
+      First release.
+    </PackageReleaseNotes>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\..\LICENSE" Pack="true" PackagePath="\" />
+    
+
+    <None Update="test.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+
+</Project>
