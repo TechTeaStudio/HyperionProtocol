@@ -1,4 +1,3 @@
-# HyperionProtocol
 # 🚀 HyperionProtocol
 
 > A high-performance, chunked TCP messaging protocol for .NET 🌟
