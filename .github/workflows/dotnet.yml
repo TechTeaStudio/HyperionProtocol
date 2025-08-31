@@ -48,7 +48,7 @@ jobs:
         id: get-versions
         run: |
           mkdir -p artifacts
-          for proj in src/*/*.csproj; do
+          for proj in src/*/*/*.csproj; do
             VERSION=$(grep -Po '(?<=<Version>)[^<]+' "$proj" || true)
             if [[ -z "$VERSION" ]]; then
               echo "Skipping $proj - no <Version> tag found"
