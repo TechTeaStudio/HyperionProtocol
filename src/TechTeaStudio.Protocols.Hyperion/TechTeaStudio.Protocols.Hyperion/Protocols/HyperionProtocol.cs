@@ -7,12 +7,12 @@ namespace TechTeaStudio.Protocols.Hyperion;
 /// <summary>Main Hyperion Protocol class.</summary>
 public class HyperionProtocol(ISerializer serializer)
 {
-	private readonly ISerializer _serializer = serializer ?? new DefaultSerializer();
+	protected readonly ISerializer _serializer = serializer ?? new DefaultSerializer();
 	private const int ChunkSize = 1024 * 1024;
 	private const int MaxHeaderLength = 64 * 1024;
 	private const string ProtocolMagic = "TTS";
 
-	public async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
+	public virtual async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
 	{
 		ArgumentNullException.ThrowIfNull(stream);
 		if(!stream.CanWrite)
@@ -52,7 +52,7 @@ public class HyperionProtocol(ISerializer serializer)
 		}
 	}
 
-	private async Task SendChunkAsync(NetworkStream stream, PacketHeader header, ReadOnlyMemory<byte> data, CancellationToken ct)
+	public virtual async Task SendChunkAsync(NetworkStream stream, PacketHeader header, ReadOnlyMemory<byte> data, CancellationToken ct)
 	{
 		var headerJson = JsonSerializer.SerializeToUtf8Bytes(header);
 
@@ -73,7 +73,7 @@ public class HyperionProtocol(ISerializer serializer)
 			await stream.WriteAsync(data, ct).ConfigureAwait(false);
 	}
 
-	public async Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default)
+	public virtual async Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default)
 	{
 		ArgumentNullException.ThrowIfNull(stream);
 		if(!stream.CanRead)
@@ -103,7 +103,7 @@ public class HyperionProtocol(ISerializer serializer)
 		}
 	}
 
-	private async Task<List<ChunkData>> ReceiveChunksAsync(NetworkStream stream, CancellationToken ct)
+	public virtual async Task<List<ChunkData>> ReceiveChunksAsync(NetworkStream stream, CancellationToken ct)
 	{
 		var chunks = new List<ChunkData>();
 		var headerLengthBuf = new byte[4];
@@ -151,13 +151,13 @@ public class HyperionProtocol(ISerializer serializer)
 		return chunks;
 	}
 
-	private static void ValidateHeaderLength(int headerLength)
+	public static void ValidateHeaderLength(int headerLength)
 	{
 		if(headerLength <= 0 || headerLength > MaxHeaderLength)
 			throw new HyperionProtocolException($"Invalid header length: {headerLength}");
 	}
 
-	private static PacketHeader DeserializeHeader(byte[] headerBytes)
+	public static PacketHeader DeserializeHeader(byte[] headerBytes)
 	{
 		try
 		{
@@ -170,7 +170,7 @@ public class HyperionProtocol(ISerializer serializer)
 		}
 	}
 
-	private static void ValidateHeader(PacketHeader header, Guid? expectedPacketId, int expectedTotalChunks, int receivedChunkCount)
+	public static void ValidateHeader(PacketHeader header, Guid? expectedPacketId, int expectedTotalChunks, int receivedChunkCount)
 	{
 		if(header.Magic != ProtocolMagic)
 			throw new HyperionProtocolException($"Invalid protocol magic. Expected '{ProtocolMagic}', got '{header.Magic}'.");
@@ -202,7 +202,7 @@ public class HyperionProtocol(ISerializer serializer)
 			throw new HyperionProtocolException($"Chunk received out of order. Expected {receivedChunkCount}, got {header.ChunkNumber}.");
 	}
 
-	private static byte[] CombineChunks(List<ChunkData> chunks)
+	public static byte[] CombineChunks(List<ChunkData> chunks)
 	{
 		int totalLength = 0;
 		foreach(var chunk in chunks)
@@ -224,7 +224,7 @@ public class HyperionProtocol(ISerializer serializer)
 	/// Reads exactly buffer.Length bytes into buffer.
 	/// Returns false if EOF is encountered before the buffer is completely filled.
 	/// </summary>
-	private static async Task<bool> ReadExactlyAsync(Stream stream, byte[] buffer, CancellationToken ct)
+	public static async Task<bool> ReadExactlyAsync(Stream stream, byte[] buffer, CancellationToken ct)
 	{
 		int totalRead = 0;
 		while(totalRead < buffer.Length)
@@ -238,6 +238,6 @@ public class HyperionProtocol(ISerializer serializer)
 		return true;
 	}
 
-	private record struct ChunkData(int ChunkNumber, byte[] Data);
 }
+
 

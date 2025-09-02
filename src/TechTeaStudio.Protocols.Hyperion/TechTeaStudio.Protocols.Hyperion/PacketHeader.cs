@@ -1,6 +1,6 @@
 ﻿namespace TechTeaStudio.Protocols.Hyperion;
 
-internal sealed class PacketHeader
+public sealed class PacketHeader
 {
 	public string Magic { get; set; } = "TTS"; // For future
 
