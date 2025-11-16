@@ -1,4 +1,5 @@
-﻿using System.Buffers.Binary;
+﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Text.Json;
 
@@ -52,6 +53,7 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 
 		try
 		{
+			// Use small array for mode buffer (1 byte - can't use stackalloc across await)
 			var modeBuffer = new byte[1];
 			if(!await ReadExactlyAsync(stream, modeBuffer, ct).ConfigureAwait(false))
 				throw new EndOfStreamException("Stream ended while reading mode byte.");
@@ -68,12 +70,15 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 			}
 			else
 			{
+				// Use array for header length buffer (can't use stackalloc across await)
 				var headerLengthBuffer = new byte[4];
 				headerLengthBuffer[0] = mode;
 
-				if(!await ReadExactlyAsync(stream, headerLengthBuffer.AsMemory(1), ct).ConfigureAwait(false))
+				// Read remaining 3 bytes
+				var remainingMemory = headerLengthBuffer.AsMemory(1, 3);
+				if(!await ReadExactlyAsync(stream, remainingMemory, ct).ConfigureAwait(false))
 					throw new EndOfStreamException("Stream ended while reading header length.");
-
+				
 				return await ReceiveChunkedAsync<T>(stream, headerLengthBuffer, ct).ConfigureAwait(false);
 			}
 		}
@@ -91,18 +96,27 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 			throw new ArgumentException($"Data too large for lightweight mode: {data.Length}");
 
 		//[magic:1][length:2][data:N]
-		var buffer = new byte[3 + data.Length];
+		var buffer = ArrayPool<byte>.Shared.Rent(3 + data.Length);
+		try
+		{
+			var span = buffer.AsSpan(0, 3 + data.Length);
+			span[0] = LightweightMagic;
+			BinaryPrimitives.WriteUInt16BigEndian(span.Slice(1), (ushort)data.Length);
+			data.CopyTo(span.Slice(3));
 
-		buffer[0] = LightweightMagic;
-		BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(1), (ushort)data.Length);
-		data.CopyTo(buffer, 3);
-
-		await stream.WriteAsync(buffer, ct).ConfigureAwait(false);
-		await stream.FlushAsync(ct).ConfigureAwait(false);
+			var memory = buffer.AsMemory(0, 3 + data.Length);
+			await stream.WriteAsync(memory, ct).ConfigureAwait(false);
+			await stream.FlushAsync(ct).ConfigureAwait(false);
+		}
+		finally
+		{
+			ArrayPool<byte>.Shared.Return(buffer);
+		}
 	}
 
 	private async Task<T> ReceiveLightweightAsync<T>(NetworkStream stream, CancellationToken ct)
 	{
+		// Use small array for length buffer (2 bytes - can't use stackalloc across await)
 		var lengthBuffer = new byte[2];
 		if(!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
 			throw new EndOfStreamException("Stream ended while reading lightweight length.");
@@ -113,7 +127,8 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 		if(dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
 			throw new EndOfStreamException("Stream ended while reading lightweight data.");
 
-		var result = _serializer.Deserialize<T>(data);
+		// Use span-based deserialization if available (.NET 10+ optimization)
+		var result = _serializer.Deserialize<T>(data.AsSpan());
 		return result ?? throw new HyperionProtocolException("Lightweight deserialization returned null.");
 	}
 
@@ -127,6 +142,7 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 			throw new ArgumentException($"Data too large for direct mode: {data.Length}");
 
 		//[magic:1][length:4][data:N]
+		// Use small array for header (5 bytes - can't use stackalloc across await)
 		var headerBuffer = new byte[5];
 		headerBuffer[0] = DirectMagic;
 		BinaryPrimitives.WriteInt32BigEndian(headerBuffer.AsSpan(1), data.Length);
@@ -141,6 +157,7 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 
 	private async Task<T> ReceiveDirectAsync<T>(NetworkStream stream, CancellationToken ct)
 	{
+		// Use small array for length buffer (4 bytes - can't use stackalloc across await)
 		var lengthBuffer = new byte[4];
 		if(!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
 			throw new EndOfStreamException("Stream ended while reading direct length.");
@@ -154,7 +171,8 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 		if(dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
 			throw new EndOfStreamException("Stream ended while reading direct data.");
 
-		var result = _serializer.Deserialize<T>(data);
+		// Use span-based deserialization if available (.NET 10+ optimization)
+		var result = _serializer.Deserialize<T>(data.AsSpan());
 		return result ?? throw new HyperionProtocolException("Direct deserialization returned null.");
 	}
 
@@ -216,7 +234,7 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 		return result ?? throw new HyperionProtocolException("Chunked deserialization returned null.");
 	}
 
-	private static byte[] CombineChunks(List<ChunkData> chunks)
+	private new static byte[] CombineChunks(List<ChunkData> chunks)
 	{
 		int totalLength = chunks.Sum(c => c.Data.Length);
 		var result = new byte[totalLength];
@@ -236,7 +254,7 @@ public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionPro
 	#region Helper Methods
 
 	/// <summary>ReadExactly.</summary>
-	private static async Task<bool> ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
+	private new static async Task<bool> ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
 	{
 		int totalRead = 0;
 		while(totalRead < buffer.Length)

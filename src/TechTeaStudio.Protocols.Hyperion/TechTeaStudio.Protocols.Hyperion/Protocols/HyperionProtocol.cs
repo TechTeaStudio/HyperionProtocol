@@ -1,4 +1,5 @@
-﻿using System.Buffers.Binary;
+﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Text.Json;
 
@@ -11,6 +12,7 @@ public class HyperionProtocol(ISerializer serializer)
 	private const int ChunkSize = 1024 * 1024;
 	private const int MaxHeaderLength = 64 * 1024;
 	private const string ProtocolMagic = "TTS";
+	private static readonly ArrayPool<byte> BufferPool = ArrayPool<byte>.Shared;
 
 	public virtual async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
 	{
@@ -59,6 +61,7 @@ public class HyperionProtocol(ISerializer serializer)
 		if(headerJson.Length <= 0 || headerJson.Length > MaxHeaderLength)
 			throw new HyperionProtocolException($"Header length out of range: {headerJson.Length}");
 
+		// Use small array for header length (4 bytes - too small for ArrayPool, but can't use stackalloc across await)
 		var headerLengthBytes = new byte[4];
 		BinaryPrimitives.WriteInt32BigEndian(headerLengthBytes, headerJson.Length);
 
@@ -106,6 +109,7 @@ public class HyperionProtocol(ISerializer serializer)
 	public virtual async Task<List<ChunkData>> ReceiveChunksAsync(NetworkStream stream, CancellationToken ct)
 	{
 		var chunks = new List<ChunkData>();
+		// Use small array for header length (4 bytes - can't use stackalloc across await)
 		var headerLengthBuf = new byte[4];
 
 		int totalChunks = int.MaxValue;
@@ -122,30 +126,54 @@ public class HyperionProtocol(ISerializer serializer)
 			int headerLength = BinaryPrimitives.ReadInt32BigEndian(headerLengthBuf);
 			ValidateHeaderLength(headerLength);
 
-			// Read header
-			var headerBytes = new byte[headerLength];
-			if(!await ReadExactlyAsync(stream, headerBytes, ct).ConfigureAwait(false))
-				throw new EndOfStreamException($"Stream ended while reading {headerLength}-byte header.");
-
-			var header = DeserializeHeader(headerBytes);
-			ValidateHeader(header, expectedPacketId, totalChunks, chunks.Count);
-
-			// Update state on first chunk
-			if(expectedPacketId == null)
+			// Use ArrayPool for header buffer
+			var headerBytes = BufferPool.Rent(headerLength);
+			try
 			{
-				expectedPacketId = header.PacketId;
-				totalChunks = header.TotalChunks;
-			}
+				var headerMemory = headerBytes.AsMemory(0, headerLength);
+				if(!await ReadExactlyAsync(stream, headerMemory, ct).ConfigureAwait(false))
+					throw new EndOfStreamException($"Stream ended while reading {headerLength}-byte header.");
 
-			// Read data
-			var data = new byte[header.DataLength];
-			if(header.DataLength > 0)
+				var header = DeserializeHeader(headerMemory.Span);
+				ValidateHeader(header, expectedPacketId, totalChunks, chunks.Count);
+
+				// Update state on first chunk
+				if(expectedPacketId == null)
+				{
+					expectedPacketId = header.PacketId;
+					totalChunks = header.TotalChunks;
+				}
+
+				// Read data - use ArrayPool for large chunks
+				byte[] data;
+				if(header.DataLength > 0)
+				{
+					data = BufferPool.Rent(header.DataLength);
+					try
+					{
+						var dataMemory = data.AsMemory(0, header.DataLength);
+						if(!await ReadExactlyAsync(stream, dataMemory, ct).ConfigureAwait(false))
+							throw new EndOfStreamException($"Stream ended while reading {header.DataLength}-byte payload.");
+
+						// Copy to final array (chunks will own the data)
+						var finalData = new byte[header.DataLength];
+						dataMemory.Span.CopyTo(finalData);
+						chunks.Add(new ChunkData(header.ChunkNumber, finalData));
+					}
+					finally
+					{
+						BufferPool.Return(data);
+					}
+				}
+				else
+				{
+					chunks.Add(new ChunkData(header.ChunkNumber, Array.Empty<byte>()));
+				}
+			}
+			finally
 			{
-				if(!await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
-					throw new EndOfStreamException($"Stream ended while reading {header.DataLength}-byte payload.");
+				BufferPool.Return(headerBytes);
 			}
-
-			chunks.Add(new ChunkData(header.ChunkNumber, data));
 		}
 
 		return chunks;
@@ -158,6 +186,20 @@ public class HyperionProtocol(ISerializer serializer)
 	}
 
 	public static PacketHeader DeserializeHeader(byte[] headerBytes)
+	{
+		try
+		{
+			return JsonSerializer.Deserialize<PacketHeader>(headerBytes)
+				?? throw new HyperionProtocolException("Header deserialized to null.");
+		}
+		catch(JsonException ex)
+		{
+			throw new HyperionProtocolException("Failed to deserialize packet header.", ex);
+		}
+	}
+
+	/// <summary>Deserialize header from span (zero-copy for .NET 10+).</summary>
+	public static PacketHeader DeserializeHeader(ReadOnlySpan<byte> headerBytes)
 	{
 		try
 		{
@@ -226,16 +268,34 @@ public class HyperionProtocol(ISerializer serializer)
 	/// </summary>
 	public static async Task<bool> ReadExactlyAsync(Stream stream, byte[] buffer, CancellationToken ct)
 	{
+		return await ReadExactlyAsync(stream, buffer.AsMemory(), ct).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Reads exactly buffer.Length bytes into buffer (Memory overload for .NET 10+).
+	/// Returns false if EOF is encountered before the buffer is completely filled.
+	/// </summary>
+	public static async Task<bool> ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
+	{
 		int totalRead = 0;
 		while(totalRead < buffer.Length)
 		{
-			int bytesRead = await stream.ReadAsync(buffer, totalRead, buffer.Length - totalRead, ct).ConfigureAwait(false);
+			int bytesRead = await stream.ReadAsync(buffer.Slice(totalRead), ct).ConfigureAwait(false);
 			if(bytesRead == 0)
 				return false; // EOF reached
 
 			totalRead += bytesRead;
 		}
 		return true;
+	}
+
+	/// <summary>
+	/// Reads exactly buffer.Length bytes into buffer (Span overload for .NET 10+).
+	/// </summary>
+	public static Task<bool> ReadExactlyAsync(Stream stream, Span<byte> buffer, CancellationToken ct)
+	{
+		var memory = buffer.ToArray().AsMemory();
+		return ReadExactlyAsync(stream, memory, ct);
 	}
 
 }
