@@ -7,17 +7,17 @@
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageId>TechTeaStudio.Protocols.Hyperion</PackageId>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <Authors>Ronald Ryan</Authors>
     <Company>Tech Tea Studio</Company>
     <Description>Base protocol for Hyperion Omni Client.</Description>
     <RepositoryUrl>https://github.com/TechTeaStudio/HyperionProtocol</RepositoryUrl>
     <PackageIcon>icon2.png</PackageIcon>
 
-    <Copyright>Copyright © Tech Tea Studio 2025</Copyright>
+    <Copyright>Copyright © Tech Tea Studio 2026</Copyright>
 
     <PackageReleaseNotes>
-      Added NET10.0 Things
+      Update License
     </PackageReleaseNotes>
 
     <PackageTags>
