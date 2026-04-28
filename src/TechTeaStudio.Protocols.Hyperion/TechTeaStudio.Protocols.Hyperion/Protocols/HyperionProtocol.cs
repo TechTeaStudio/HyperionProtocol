@@ -281,8 +281,7 @@ public class HyperionProtocol(ISerializer serializer)
 		while(totalRead < buffer.Length)
 		{
 			int bytesRead = await stream.ReadAsync(buffer.Slice(totalRead), ct).ConfigureAwait(false);
-			if(bytesRead == 0)
-				return false; // EOF reached
+			if(bytesRead == 0) return false; // EOF reached
 
 			totalRead += bytesRead;
 		}
