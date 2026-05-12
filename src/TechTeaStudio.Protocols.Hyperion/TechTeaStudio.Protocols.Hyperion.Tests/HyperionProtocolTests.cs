@@ -1,333 +1,245 @@
-﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
 namespace TechTeaStudio.Protocols.Hyperion.Tests;
 
 [TestFixture]
-[Ignore("For Now")]
 public class HyperionProtocolTests
 {
-	private TcpListener? _listener;
-	private CancellationTokenSource? _serverCts;
-	private const int TestPort = 6071; 
+    private TcpListener _listener = null!;
+    private CancellationTokenSource _serverCts = null!;
+    private int _port;
 
-	[OneTimeSetUp]
-	public async Task OneTimeSetUp()
-	{
-		_serverCts = new CancellationTokenSource();
-		_listener = new TcpListener(IPAddress.Loopback, TestPort);
-		_listener.Start();
+    [OneTimeSetUp]
+    public async Task OneTimeSetUp()
+    {
+        _serverCts = new CancellationTokenSource();
+        _listener = new TcpListener(IPAddress.Loopback, 0);
+        _listener.Start();
+        _port = ((IPEndPoint)_listener.LocalEndpoint).Port;
 
-		_ = RunTestServerAsync(_serverCts.Token);
+        _ = AcceptLoopAsync(_listener, _serverCts.Token);
+        await Task.Delay(50);
+    }
 
-		await Task.Delay(200);
-	}
+    [OneTimeTearDown]
+    public void OneTimeTearDown()
+    {
+        _serverCts.Cancel();
+        _listener.Stop();
+        _serverCts.Dispose();
+        (_listener as IDisposable)?.Dispose();
+    }
 
-	[OneTimeTearDown]
-	public void OneTimeTearDown()
-	{
-		_serverCts?.Cancel();
-		_listener?.Stop();
-		_serverCts?.Dispose();
-		_listener?.Dispose();
-	}
+    [Test]
+    public async Task SendReceive_SimpleString_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-	[Test]
-	public async Task SendReceive_SimpleString_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+        const string testMessage = "Hello HyperionProtocol!";
+        await protocol.SendAsync(testMessage, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		const string testMessage = "Hello HyperionProtocol!";
+        Assert.That(response, Is.EqualTo($"Echo: {testMessage}"));
+    }
 
-		// Act
-		await protocol.SendAsync(testMessage, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
+    [Test]
+    public async Task SendReceive_EmptyString_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-		// Assert
-		Assert.That(response, Is.EqualTo($"Echo: {testMessage}"));
-	}
+        await protocol.SendAsync(string.Empty, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-	[Test]
-	public async Task SendReceive_EmptyString_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+        Assert.That(response, Is.EqualTo("Echo: "));
+    }
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		const string testMessage = "";
+    [Test]
+    public async Task SendReceive_LargeString_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-		// Act
-		await protocol.SendAsync(testMessage, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
+        var largeString = new string('A', 10_000);
+        await protocol.SendAsync(largeString, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-		// Assert
-		Assert.That(response, Is.EqualTo("Echo: "));
-	}
+        Assert.That(response, Is.EqualTo($"Echo: {largeString}"));
+    }
 
-	[Test]
-	public async Task SendReceive_LargeString_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+    [Test]
+    public async Task SendReceive_ByteArray_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		var largeString = new string('A', 10000); // 10KB строка
+        var testData = GenerateTestData(1024);
+        await protocol.SendAsync(testData, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-		// Act
-		var sw = Stopwatch.StartNew();
-		await protocol.SendAsync(largeString, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
-		sw.Stop();
+        Assert.That(response, Is.EqualTo($"Received {testData.Length} bytes"));
+    }
 
-		// Assert
-		Assert.That(response, Is.EqualTo($"Echo: {largeString}"));
-		Console.WriteLine($"Large string test completed in {sw.ElapsedMilliseconds} ms");
-	}
+    [Test]
+    public async Task SendReceive_LargeByteArray_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-	[Test]
-	public async Task SendReceive_ByteArray_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+        var largeData = GenerateTestData(5 * 1024 * 1024);
+        await protocol.SendAsync(largeData, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		var testData = GenerateTestData(1024);
+        Assert.That(response, Is.EqualTo($"Received {largeData.Length} bytes"));
+    }
 
-		// Act
-		await protocol.SendAsync(testData, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
+    [Test]
+    public async Task SendReceive_MultipleChunks_Success()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
 
-		// Assert
-		Assert.That(response, Is.EqualTo($"Received {testData.Length} bytes"));
-	}
+        var data = GenerateTestData(2 * 1024 * 1024);
+        await protocol.SendAsync(data, stream);
+        var response = await protocol.ReceiveAsync<string>(stream);
 
-	[Test]
-	public async Task SendReceive_LargeByteArray_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+        Assert.That(response, Is.EqualTo($"Received {data.Length} bytes"));
+    }
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		var largeData = GenerateTestData(5 * 1024 * 1024); // 5MB данных
+    [Test]
+    public async Task SendReceive_ConcurrentClients_Success()
+    {
+        const int clientCount = 10;
+        var tasks = new List<Task>();
 
-		// Act
-		var sw = Stopwatch.StartNew();
-		await protocol.SendAsync(largeData, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
-		sw.Stop();
+        for (int i = 0; i < clientCount; i++)
+        {
+            int clientId = i;
+            tasks.Add(Task.Run(async () =>
+            {
+                using var client = await ConnectAsync();
+                using var stream = client.GetStream();
+                var protocol = new HyperionProtocol(new DefaultSerializer());
+                var message = $"Client {clientId} message";
 
-		// Assert
-		Assert.That(response, Is.EqualTo($"Received {largeData.Length} bytes"));
-		Console.WriteLine($"Large data test (5MB) completed in {sw.ElapsedMilliseconds} ms");
-	}
+                await protocol.SendAsync(message, stream);
+                var response = await protocol.ReceiveAsync<string>(stream);
+                Assert.That(response, Is.EqualTo($"Echo: {message}"));
+            }));
+        }
 
-	[Test]
-	public async Task SendReceive_MultipleChunks_Success()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
+        await Task.WhenAll(tasks);
+    }
 
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		var largeData = GenerateTestData(2 * 1024 * 1024);
+    [Test]
+    public void SendAsync_NullStream_ThrowsArgumentNullException()
+    {
+        var protocol = new HyperionProtocol(new DefaultSerializer());
+        NetworkStream nullStream = null!;
+        Assert.ThrowsAsync<ArgumentNullException>(async () =>
+            await protocol.SendAsync("test", nullStream));
+    }
 
-		// Act
-		await protocol.SendAsync(largeData, networkStream);
-		var response = await protocol.ReceiveAsync<string>(networkStream);
+    [Test]
+    public void ReceiveAsync_NullStream_ThrowsArgumentNullException()
+    {
+        var protocol = new HyperionProtocol(new DefaultSerializer());
+        NetworkStream nullStream = null!;
+        Assert.ThrowsAsync<ArgumentNullException>(async () =>
+            await protocol.ReceiveAsync<string>(nullStream));
+    }
 
-		// Assert
-		Assert.That(response, Is.EqualTo($"Received {largeData.Length} bytes"));
-	}
+    [Test]
+    public async Task SendAsync_WithCancelledToken_ThrowsOperationCanceledException()
+    {
+        using var client = await ConnectAsync();
+        using var stream = client.GetStream();
+        var protocol = new HyperionProtocol(new DefaultSerializer());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
 
-	[Test]
-	public async Task SendReceive_ConcurrentClients_Success()
-	{
-		// Arrange
-		const int clientCount = 10;
-		var tasks = new List<Task>();
-		var semaphore = new SemaphoreSlim(5, 5);
+        Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await protocol.SendAsync("test", stream, cts.Token));
+    }
 
-		// Act
-		for(int i = 0; i < clientCount; i++)
-		{
-			int clientId = i;
-			tasks.Add(Task.Run(async () =>
-			{
-				await semaphore.WaitAsync();
-				try
-				{
-					using var client = new TcpClient();
-					await client.ConnectAsync(IPAddress.Loopback, TestPort);
-					using var networkStream = client.GetStream();
+    [Test]
+    public void Ctor_NullSerializer_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => new HyperionProtocol(null!));
+    }
 
-					var protocol = new HyperionProtocol(new DefaultSerializer());
-					var message = $"Client {clientId} message";
+    [Test]
+    public void Ctor_InvalidOptions_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new HyperionProtocol(new DefaultSerializer(), new HyperionProtocolOptions { ChunkSize = 0 }));
+    }
 
-					await protocol.SendAsync(message, networkStream);
-					var response = await protocol.ReceiveAsync<string>(networkStream);
+    private async Task<TcpClient> ConnectAsync()
+    {
+        var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, _port);
+        return client;
+    }
 
-					Assert.That(response, Is.EqualTo($"Echo: {message}"));
-				}
-				finally
-				{
-					semaphore.Release();
-				}
-			}));
-		}
+    private static async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            TcpClient tcp;
+            try { tcp = await listener.AcceptTcpClientAsync(); }
+            catch (ObjectDisposedException) { return; }
+            catch when (ct.IsCancellationRequested) { return; }
 
-		// Assert
-		await Task.WhenAll(tasks);
-		Assert.Pass($"All {clientCount} concurrent clients completed successfully");
-	}
+            _ = HandleClientAsync(tcp, ct);
+        }
+    }
 
-	[Test]
-	public void SendAsync_NullStream_ThrowsArgumentNullException()
-	{
-		// Arrange
-		var protocol = new HyperionProtocol(new DefaultSerializer());
+    private static async Task HandleClientAsync(TcpClient tcpClient, CancellationToken ct)
+    {
+        try
+        {
+            using (tcpClient)
+            using (var networkStream = tcpClient.GetStream())
+            {
+                var protocol = new HyperionProtocol(new DefaultSerializer());
+                var rawData = await protocol.ReceiveAsync<byte[]>(networkStream, ct);
 
-		// Act & Assert
-		Assert.ThrowsAsync<ArgumentNullException>(async () =>
-			await protocol.SendAsync("test", null!));
-	}
+                string response = IsLikelyText(rawData)
+                    ? $"Echo: {System.Text.Encoding.UTF8.GetString(rawData)}"
+                    : $"Received {rawData.Length} bytes";
 
-	[Test]
-	public void ReceiveAsync_NullStream_ThrowsArgumentNullException()
-	{
-		// Arrange
-		var protocol = new HyperionProtocol(new DefaultSerializer());
+                await protocol.SendAsync(response, networkStream, ct);
+                await networkStream.FlushAsync(ct);
+                await Task.Delay(20, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch { /* swallow */ }
+    }
 
-		// Act & Assert
-		Assert.ThrowsAsync<ArgumentNullException>(async () =>
-			await protocol.ReceiveAsync<string>(null!));
-	}
+    private static bool IsLikelyText(byte[] data)
+    {
+        if (data.Length == 0) return true;
+        var str = System.Text.Encoding.UTF8.GetString(data);
+        if (str.Contains('\0')) return false;
+        int printable = str.Count(c =>
+            char.IsLetterOrDigit(c) || char.IsPunctuation(c) || char.IsWhiteSpace(c));
+        return printable > data.Length * 0.8;
+    }
 
-	[Test]
-	public async Task SendReceive_WithCancellation_ThrowsOperationCanceledException()
-	{
-		// Arrange
-		using var client = new TcpClient();
-		await client.ConnectAsync(IPAddress.Loopback, TestPort);
-		using var networkStream = client.GetStream();
-
-		var protocol = new HyperionProtocol(new DefaultSerializer());
-		using var cts = new CancellationTokenSource();
-
-		// Act & Assert
-		cts.Cancel();
-
-		Assert.ThrowsAsync<OperationCanceledException>(async () =>
-			await protocol.SendAsync("test", networkStream, cts.Token));
-	}
-
-	private static async Task RunTestServerAsync(CancellationToken cancellationToken)
-	{
-		var listener = new TcpListener(IPAddress.Loopback, TestPort);
-		listener.Start();
-
-		try
-		{
-			while(!cancellationToken.IsCancellationRequested)
-			{
-				try
-				{
-					var tcpClient = await listener.AcceptTcpClientAsync();
-					_ = HandleTestClientAsync(tcpClient, cancellationToken);
-				}
-				catch(ObjectDisposedException)
-				{
-					break;
-				}
-				catch(Exception ex)
-				{
-					if(!cancellationToken.IsCancellationRequested)
-					{
-						Console.WriteLine($"[TestServer] Error accepting client: {ex.Message}");
-					}
-				}
-			}
-		}
-		finally
-		{
-			listener.Stop();
-		}
-	}
-
-	private static async Task HandleTestClientAsync(TcpClient tcpClient, CancellationToken cancellationToken)
-	{
-		try
-		{
-			using(tcpClient)
-			using(var networkStream = tcpClient.GetStream())
-			{
-				var protocol = new HyperionProtocol(new DefaultSerializer());
-
-				var rawData = await protocol.ReceiveAsync<byte[]>(networkStream, cancellationToken);
-
-				string response;
-
-				if(IsLikelyTextData(rawData))
-				{
-					var str = System.Text.Encoding.UTF8.GetString(rawData);
-					response = $"Echo: {str}";
-				}
-				else
-				{
-					response = $"Received {rawData.Length} bytes";
-				}
-
-				await protocol.SendAsync(response, networkStream, cancellationToken);
-				await networkStream.FlushAsync(cancellationToken);
-				await Task.Delay(50, cancellationToken);
-			}
-		}
-		catch(OperationCanceledException)
-		{
-		}
-		catch(Exception ex)
-		{
-			Console.WriteLine($"[TestServer] Error handling client: {ex.Message}");
-		}
-	}
-
-	private static bool IsLikelyTextData(byte[] data)
-	{
-		if(data.Length == 0) return true;
-
-		try
-		{
-			var str = System.Text.Encoding.UTF8.GetString(data);
-
-			if(str.Contains('\0')) return false;
-
-			int printableCount = str.Count(c => char.IsLetterOrDigit(c) || char.IsPunctuation(c) || char.IsWhiteSpace(c));
-			return printableCount > data.Length * 0.8;
-		}
-		catch
-		{
-			return false;
-		}
-	}
-
-	private static byte[] GenerateTestData(int size)
-	{
-		var data = new byte[size];
-		var random = new Random(42);
-		random.NextBytes(data);
-		return data;
-	}
+    private static byte[] GenerateTestData(int size)
+    {
+        var data = new byte[size];
+        new Random(42).NextBytes(data);
+        return data;
+    }
 }

@@ -1,34 +1,41 @@
-﻿namespace TechTeaStudio.Protocols.Hyperion.Protocols;
+namespace TechTeaStudio.Protocols.Hyperion.Protocols;
 
-public partial class SmartHyperionProtocol
+/// <summary>Counters for <see cref="SmartHyperionProtocol"/> framing-mode picks.</summary>
+public sealed class ProtocolStats
 {
-	public class ProtocolStats
-	{
-		public long LightweightMessagesSent { get; internal set; }
+    /// <summary>Messages sent using lightweight framing (&lt; 1 KiB).</summary>
+    public long LightweightMessagesSent { get; internal set; }
 
-		public long DirectMessagesSent { get; internal set; }
+    /// <summary>Messages sent using direct framing (&lt; 64 KiB).</summary>
+    public long DirectMessagesSent { get; internal set; }
 
-		public long ChunkedMessagesSent { get; internal set; }
+    /// <summary>Messages sent using chunked framing.</summary>
+    public long ChunkedMessagesSent { get; internal set; }
 
-		public long TotalBytesSaved { get; internal set; }
+    /// <summary>Approximate bytes saved versus framing every message as chunked.</summary>
+    public long TotalBytesSaved { get; internal set; }
 
-		public void Reset()
-		{
-			LightweightMessagesSent = 0;
-			DirectMessagesSent = 0;
-			ChunkedMessagesSent = 0;
-			TotalBytesSaved = 0;
-		}
+    /// <summary>Total messages sent across all modes.</summary>
+    public long TotalMessagesSent =>
+        LightweightMessagesSent + DirectMessagesSent + ChunkedMessagesSent;
 
-		public override string ToString()
-		{
-			var total = LightweightMessagesSent + DirectMessagesSent + ChunkedMessagesSent;
-			return $"Protocol Stats:\n" +
-				   $"Lightweight: {LightweightMessagesSent} ({100.0 * LightweightMessagesSent / Math.Max(1, total):F1}%)\n" +
-				   $"Direct: {DirectMessagesSent} ({100.0 * DirectMessagesSent / Math.Max(1, total):F1}%)\n" +
-				   $"Chunked: {ChunkedMessagesSent} ({100.0 * ChunkedMessagesSent / Math.Max(1, total):F1}%)\n" +
-				   $"Bytes saved: {TotalBytesSaved:N0}";
-		}
-	}
+    /// <summary>Zeroes all counters.</summary>
+    public void Reset()
+    {
+        LightweightMessagesSent = 0;
+        DirectMessagesSent = 0;
+        ChunkedMessagesSent = 0;
+        TotalBytesSaved = 0;
+    }
 
+    /// <inheritdoc />
+    public override string ToString()
+    {
+        var total = Math.Max(1L, TotalMessagesSent);
+        return $"Protocol Stats:\n" +
+               $"Lightweight: {LightweightMessagesSent} ({100.0 * LightweightMessagesSent / total:F1}%)\n" +
+               $"Direct:      {DirectMessagesSent} ({100.0 * DirectMessagesSent / total:F1}%)\n" +
+               $"Chunked:     {ChunkedMessagesSent} ({100.0 * ChunkedMessagesSent / total:F1}%)\n" +
+               $"Bytes saved: {TotalBytesSaved:N0}";
+    }
 }

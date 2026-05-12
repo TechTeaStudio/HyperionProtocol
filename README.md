@@ -1,42 +1,72 @@
-# 🚀 HyperionProtocol
+<p align="center">
+  <img src="https://raw.githubusercontent.com/TechTeaStudio/HyperionProtocol/main/src/TechTeaStudio.Protocols.Hyperion/icon2.png" alt="HyperionProtocol logo" width="160" />
+</p>
 
-> A high-performance, chunked TCP messaging protocol for .NET 🌟
+<h1 align="center">HyperionProtocol</h1>
 
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-blue.svg)](https://dotnet.microsoft.com/download/dotnet/8.0)
-[![.NET 9](https://img.shields.io/badge/.NET-8.0-blue.svg)](https://dotnet.microsoft.com/download/dotnet/9.0)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![NUnit Tests](https://img.shields.io/badge/tests-NUnit-brightgreen.svg)](https://nunit.org/)
+<p align="center">
+  Chunked TCP messaging for .NET. Pluggable serialization, adaptive framing, streaming receive, and <code>System.IO.Pipelines</code> support &mdash; without the weight of a full RPC framework.
+</p>
 
-## 📋 Table of Contents
+<p align="center">
+  <a href="https://www.nuget.org/packages/TechTeaStudio.Protocols.Hyperion"><img alt="NuGet" src="https://img.shields.io/nuget/v/TechTeaStudio.Protocols.Hyperion.svg?logo=nuget&label=NuGet" /></a>
+  <a href="https://www.nuget.org/packages/TechTeaStudio.Protocols.Hyperion"><img alt="Downloads" src="https://img.shields.io/nuget/dt/TechTeaStudio.Protocols.Hyperion.svg?logo=nuget&label=Downloads" /></a>
+  <img alt=".NET" src="https://img.shields.io/badge/.NET-6.0%20%7C%208.0%20%7C%209.0%20%7C%2010.0-512BD4?logo=dotnet&logoColor=white" />
+  <a href="https://github.com/TechTeaStudio/HyperionProtocol/actions/workflows/dotnet.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/TechTeaStudio/HyperionProtocol/dotnet.yml?branch=main&logo=github&label=build" /></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+</p>
 
-- [Features](#-features)
-- [Quick Start](#-quick-start)
-- [Installation](#-installation)
-- [Usage](#-usage)
-- [Architecture](#-architecture)
-- [Testing](#-testing)
-- [Performance](#-performance)
-- [API Reference](#-api-reference)
-- [Contributing](#-contributing)
-- [License](#-license)
+## Overview
 
-## ✨ Features
+HyperionProtocol solves three problems that every long-lived TCP service in .NET eventually re-implements: message framing, chunking of payloads that don't fit in one socket write, and a clean boundary between the wire format and your serializer of choice. It does this with a small, focused public surface, four target frameworks, and no opinion about what your messages contain.
 
-- 🔥 **High Performance**: Efficient chunked data transmission
-- 📦 **Large Data Support**: Seamlessly handles files up to several GB
-- 🔀 **Chunked Protocol**: Automatic splitting of large messages into manageable chunks
-- 🛡️ **Error Handling**: Robust error detection and recovery
-- ⚡ **Async/Await**: Fully asynchronous API with cancellation support
-- 🧪 **Well Tested**: Comprehensive test suite with NUnit
-- 🔧 **Extensible**: Pluggable serialization system
-- 📊 **Packet Integrity**: Each message has unique ID and chunk validation
+The package powers the Hyperion Omni Client but is independent: any .NET app that talks over `NetworkStream` &mdash; or anything that exposes a `Stream` / `PipeReader` / `PipeWriter` &mdash; can adopt it as a one-line replacement for hand-rolled framing.
 
-## 🚀 Quick Start
+## When to reach for it
 
-### Server Example
+You want this library when you need a **point-to-point binary protocol over TCP** and you'd rather not write the framing yourself. Concretely, that means:
+
+- A client and a server you own on both ends.
+- Messages that may be small (a few bytes) or large (multi-gigabyte file transfers).
+- A serializer you've already chosen &mdash; `System.Text.Json`, MessagePack, protobuf-net, MemoryPack, whatever &mdash; that you want to keep using as-is.
+- An async/await codebase that benefits from `IAsyncEnumerable` and `System.IO.Pipelines`.
+
+You probably **don't** want this library when you need browser interop (use WebSocket or SignalR), when you need full method-call RPC semantics with code generation (use gRPC), or when you need a message broker for pub/sub (use NATS or MQTT).
+
+## How it compares
+
+| Library / Approach | What it gives you | Schema / codegen | Native chunking | Streaming receive | Browser | Dep footprint |
+|---|---|---|---|---|---|---|
+| **HyperionProtocol** | Framing + adaptive chunking + pluggable serializer | None | Yes (default 1 MiB) | `IAsyncEnumerable<ReadOnlyMemory<byte>>` | No | `System.IO.Pipelines` |
+| **gRPC** (`Grpc.Net.Client`) | Full RPC framework with services, methods, streaming | `.proto` + codegen | Via HTTP/2 framing | Yes (server-streaming RPCs) | Through grpc-web | Large (`Grpc.*`, HTTP/2 stack) |
+| **SignalR client** | Real-time hub/RPC over WebSocket / SSE / long-poll | None at wire level, attribute-based at API | No (transport-level only) | Streaming hub methods | First-class | Large (`Microsoft.AspNetCore.SignalR.Client` + transports) |
+| **`System.Net.WebSockets`** | Frame-based bidirectional messaging | None | No (you split & reassemble) | Manual | First-class | In-box |
+| **`StreamJsonRpc`** | JSON-RPC 2.0 over any `Stream` | None | No | No (response is one message) | Through duplex pipe wrappers | `StreamJsonRpc` |
+| **Raw `TcpClient` + custom framing** | Everything is yours | None | Whatever you write | Whatever you write | No | None |
+
+The honest pitch: HyperionProtocol sits in the gap between **"raw TCP with handmade length-prefixed framing"** and **"a full RPC framework"**. If you're about to write your fifth `[length:4][payload]` loop and then realise you also need to chunk multi-megabyte payloads and stream them straight to disk, this is the package that already did all of that.
+
+## Install
+
+```bash
+dotnet add package TechTeaStudio.Protocols.Hyperion
+```
+
+Or pin a specific version in `.csproj`:
+
+```xml
+<PackageReference Include="TechTeaStudio.Protocols.Hyperion" Version="0.3.0" />
+```
+
+## Quick start
+
+### Server
 
 ```csharp
+using System.Net;
+using System.Net.Sockets;
 using TechTeaStudio.Protocols.Hyperion;
+using TechTeaStudio.Protocols.Hyperion.Protocols;
 
 var listener = new TcpListener(IPAddress.Any, 8080);
 listener.Start();
@@ -49,364 +79,264 @@ while (true)
 
 async Task HandleClientAsync(TcpClient client)
 {
-    using var stream = client.GetStream();
-    var protocol = new HyperionProtocol(new JsonSerializer());
-    
-    var message = await protocol.ReceiveAsync<string>(stream);
-    Console.WriteLine($"📨 Received: {message}");
-    
-    await protocol.SendAsync($"Echo: {message}", stream);
+    using (client)
+    using (var stream = client.GetStream())
+    {
+        var protocol = new SmartHyperionProtocol(new DefaultSerializer());
+
+        var message = await protocol.ReceiveAsync<string>(stream);
+        await protocol.SendAsync($"Echo: {message}", stream);
+    }
 }
 ```
 
-### Client Example
+### Client
 
 ```csharp
 using var client = new TcpClient();
 await client.ConnectAsync("localhost", 8080);
 using var stream = client.GetStream();
 
-var protocol = new HyperionProtocol(new JsonSerializer());
+var protocol = new SmartHyperionProtocol(new DefaultSerializer());
 
-await protocol.SendAsync("Hello HyperionProtocol! 👋", stream);
+await protocol.SendAsync("Hello HyperionProtocol!", stream);
 var response = await protocol.ReceiveAsync<string>(stream);
-
-Console.WriteLine($"📬 Server replied: {response}");
 ```
 
-## 📥 Installation
+### Custom serializer
 
-### Option 1: Clone and Build
-
-```bash
-git clone https://github.com/yourusername/HyperionProtocol.git
-cd HyperionProtocol
-dotnet build
-```
-
-### Option 2: Add as Project Reference
-
-1. Copy the `TechTeaStudio.Protocols.Hyperion` folder to your solution
-2. Add project reference:
-
-```xml
-<ProjectReference Include="..\TechTeaStudio.Protocols.Hyperion\TechTeaStudio.Protocols.Hyperion.csproj" />
-```
-
-## 🛠️ Usage
-
-### Basic Setup
+Implement `ISerializer` to plug in MessagePack, protobuf, MemoryPack, or anything else:
 
 ```csharp
-// 1️⃣ Create a serializer
-var serializer = new DefaultSerializer(); // or implement ISerializer
-
-// 2️⃣ Create protocol instance  
-var protocol = new HyperionProtocol(serializer);
-
-// 3️⃣ Send/Receive data
-await protocol.SendAsync(myData, networkStream);
-var receivedData = await protocol.ReceiveAsync<MyType>(networkStream);
-```
-
-### Sending Large Files 📁
-
-```csharp
-var fileBytes = await File.ReadAllBytesAsync("largefile.zip");
-await protocol.SendAsync(fileBytes, stream);
-
-// File is automatically chunked into 1MB pieces
-// and reassembled on the receiving end! ✨
-```
-
-### Custom Serialization
-
-```csharp
-public class MyCustomSerializer : ISerializer
+public sealed class MessagePackSerializer : ISerializer
 {
-    public byte[] Serialize<T>(T obj)
-    {
-        // Your custom serialization logic
-        return MessagePack.Serialize(obj);
-    }
-    
-    public T Deserialize<T>(byte[] data)
-    {
-        // Your custom deserialization logic
-        return MessagePack.Deserialize<T>(data);
-    }
+    public byte[] Serialize<T>(T obj)   => MessagePack.MessagePackSerializer.Serialize(obj);
+    public T Deserialize<T>(byte[] data) => MessagePack.MessagePackSerializer.Deserialize<T>(data);
+}
+
+var protocol = new SmartHyperionProtocol(new MessagePackSerializer());
+```
+
+The default `DefaultSerializer` already short-circuits `string` and `byte[]` to avoid round-tripping them through JSON.
+
+## Working with large payloads
+
+Anything bigger than 64 KiB falls onto the chunked path (default chunk size: 1 MiB). For receivers that don't want to buffer the full message in memory, use the streaming variant &mdash; it yields each chunk as it arrives.
+
+```csharp
+await using var file = File.Create("incoming.bin");
+await foreach (var chunk in protocol.ReceiveStreamingAsync(stream))
+{
+    await file.WriteAsync(chunk);
 }
 ```
 
-### Error Handling 🛡️
+Validation (magic, version, chunk order, end-flag, packet-id continuity) runs before every `yield`, so corrupt or out-of-order traffic surfaces as a `HyperionProtocolException` immediately, not after the whole payload has been read.
+
+### System.IO.Pipelines
+
+For high-throughput services, use the Pipelines overloads for zero-copy writes and natural backpressure:
 
 ```csharp
-try
+var writer = PipeWriter.Create(networkStream);
+var reader = PipeReader.Create(networkStream);
+
+await protocol.SendAsync(message, writer);
+var response = await protocol.ReceiveAsync<MyType>(reader);
+```
+
+## Adaptive framing
+
+`SmartHyperionProtocol` picks the cheapest layout per message. You don't tune anything &mdash; the sender decides based on payload size:
+
+| Payload | Wire format | Overhead |
+|---|---|---|
+| `< 1 KiB` | `[magic:1 = 0xFF][length:2 BE][data]` | **3 bytes** |
+| `< 64 KiB` | `[magic:1 = 0xFE][length:4 BE][data]` | **5 bytes** |
+| anything else | chunked frames with a JSON `PacketHeader` (same as base `HyperionProtocol`) | **~120 bytes per chunk** |
+
+The receiver reads one byte to disambiguate: `0xFF`/`0xFE` pick lightweight/direct, anything else is taken as the high byte of the chunked header-length prefix (a JSON header is always small enough that this byte is `0x00`).
+
+You can observe what the picker chose:
+
+```csharp
+var stats = protocol.GetStatsSnapshot();
+Console.WriteLine(stats);
+// Protocol Stats:
+// Lightweight: 42 (84.0%)
+// Direct:       6 (12.0%)
+// Chunked:      2  (4.0%)
+// Bytes saved: 6,612
+```
+
+## Protocol version negotiation
+
+`PacketHeader.Version` is part of every chunked frame; the validator accepts versions in `[MinSupportedProtocolVersion .. ProtocolVersion]` (currently `0..1`, with `0` treated as legacy v1 from 0.2.x senders). An optional handshake helper exchanges a magic preamble plus version on connection and returns the minimum both sides agree to speak:
+
+```csharp
+int version = await HyperionProtocol.HandshakeAsync(stream);
+if (version < HyperionProtocol.ProtocolVersion)
 {
-    await protocol.SendAsync(data, stream, cancellationToken);
+    // adapt: fall back to features the older peer understands
 }
-catch (HyperionProtocolException ex)
+```
+
+## Wire format
+
+```
+Chunked frame (HyperionProtocol & SmartHyperionProtocol fallback):
+
+  ┌──────────────────┬────────────────────┬─────────────────┐
+  │ Header Length    │ JSON Header        │ Chunk Payload   │
+  │ 4 bytes BE       │ N bytes (≤ 64 KiB) │ ≤ 1 MiB         │
+  └──────────────────┴────────────────────┴─────────────────┘
+
+Header (JSON):
+  { "Version":1, "Magic":"TTS", "PacketId":"<guid>",
+    "ChunkNumber":0, "TotalChunks":5, "DataLength":1048576, "Flags":0 }
+
+Smart-mode framing for small messages skips the JSON header entirely:
+
+  Lightweight (<1 KiB):  [0xFF][len:2 BE][data]
+  Direct      (<64 KiB): [0xFE][len:4 BE][data]
+```
+
+Both ends of a connection must agree on `ChunkSize` and `MaxHeaderLength`; the receiver rejects oversized chunks and headers. The defaults are 1 MiB and 64 KiB respectively, configurable via `HyperionProtocolOptions`.
+
+## Public API
+
+```csharp
+public class HyperionProtocol
 {
-    Console.WriteLine($"🚨 Protocol error: {ex.Message}");
+    public const int ProtocolVersion = 1;
+    public const int MinSupportedProtocolVersion = 0;
+
+    public HyperionProtocol(ISerializer serializer);
+    public HyperionProtocol(ISerializer serializer, HyperionProtocolOptions options);
+
+    public int ChunkSize { get; }
+    public int MaxHeaderLength { get; }
+
+    // NetworkStream API
+    public virtual Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default);
+    public virtual Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default);
+    public virtual IAsyncEnumerable<ReadOnlyMemory<byte>> ReceiveStreamingAsync(NetworkStream stream, CancellationToken ct = default);
+
+    // Pipelines API
+    public virtual Task SendAsync<T>(T message, PipeWriter writer, CancellationToken ct = default);
+    public virtual Task<T> ReceiveAsync<T>(PipeReader reader, CancellationToken ct = default);
+
+    // Optional handshake
+    public static Task<int> HandshakeAsync(NetworkStream stream, int? localVersion = null, CancellationToken ct = default);
 }
-catch (OperationCanceledException)
+
+public class SmartHyperionProtocol : HyperionProtocol
 {
-    Console.WriteLine("⏹️ Operation was cancelled");
+    public ProtocolStats Stats { get; }
+    public ProtocolStats GetStatsSnapshot();
+    public void ResetStats();
 }
-```
 
-## 🏗️ Architecture
-
-### Protocol Structure
-
-```
-📦 Packet Structure:
-┌─────────────────┬─────────────────┬─────────────────┐
-│  Header Length  │   JSON Header   │   Payload Data  │
-│    (4 bytes)    │  (variable)     │   (≤ 1MB)       │
-└─────────────────┴─────────────────┴─────────────────┘
-```
-
-### Header Format
-
-```json
-{
-  "Magic": "TTS",
-  "PacketId": "guid-here",
-  "ChunkNumber": 0,
-  "TotalChunks": 5,
-  "DataLength": 1048576,
-  "Flags": 0
-}
-```
-
-### Chunk Flow 🌊
-
-```
-Large Message (5MB)
-        ↓
-    Chunking 📦
-        ↓
-┌─────────┬─────────┬─────────┬─────────┬─────────┐
-│ Chunk 0 │ Chunk 1 │ Chunk 2 │ Chunk 3 │ Chunk 4 │
-│  1MB    │  1MB    │  1MB    │  1MB    │  1MB    │
-└─────────┴─────────┴─────────┴─────────┴─────────┘
-        ↓
-   Network Transfer 🌐
-        ↓
-   Reassembly 🔧
-        ↓
-  Complete Message ✅
-```
-
-## 🧪 Testing
-
-### Run All Tests
-
-```bash
-cd TechTeaStudio.Protocols.Hyperion.Tests
-dotnet test
-```
-
-### Run Specific Test Category
-
-```bash
-# Performance tests
-dotnet test --filter "Category=Performance"
-
-# Basic functionality
-dotnet test --filter "SendReceive"
-
-# Error handling
-dotnet test --filter "Exception"
-```
-
-### Test Console Application
-
-```bash
-cd ConsoleApp
-dotnet run
-```
-
-Expected output:
-```
-🎯 Starting Hyperion Protocol minimal test...
-📡 Server listening on port 6000...
-📤 [Client] Sending: Hello HyperionProtocol!
-📨 [Server] Received: Hello HyperionProtocol!
-📬 [Client] Received: Echo: Hello HyperionProtocol!
-✅ Test PASSED
-```
-
-## ⚡ Performance
-
-### Benchmarks 📊
-
-| Test Scenario | Data Size | Time | Throughput |
-|---------------|-----------|------|------------|
-| Small Message | 1KB | ~1ms | ~1MB/s |
-| Medium File | 1MB | ~10ms | ~100MB/s |
-| Large File | 100MB | ~500ms | ~200MB/s |
-| Huge File | 1GB | ~3-5s | ~200-300MB/s |
-
-### Memory Usage 💾
-
-- **Chunk Size**: 1MB (configurable)
-- **Memory Footprint**: ~2-3MB per active connection
-- **GC Pressure**: Minimal due to efficient buffering
-
-## 📚 API Reference
-
-### HyperionProtocol Class
-
-#### Constructor
-```csharp
-public HyperionProtocol(ISerializer serializer)
-```
-
-#### Methods
-
-##### SendAsync
-```csharp
-public async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
-```
-Sends a message through the network stream.
-
-**Parameters:**
-- `message`: Object to send
-- `stream`: Network stream
-- `ct`: Cancellation token
-
-##### ReceiveAsync
-```csharp
-public async Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default)
-```
-Receives a message from the network stream.
-
-**Returns:** Deserialized object of type T
-
-### ISerializer Interface
-
-```csharp
 public interface ISerializer
 {
     byte[] Serialize<T>(T obj);
     T Deserialize<T>(byte[] data);
+    void Serialize<T>(IBufferWriter<byte> writer, T obj);
+    T Deserialize<T>(ReadOnlySpan<byte> data);
 }
-```
 
-### HyperionProtocolException
-
-Custom exception thrown when protocol-level errors occur.
-
-```csharp
-public class HyperionProtocolException : Exception
+public sealed class HyperionProtocolOptions
 {
-    public HyperionProtocolException(string message);
-    public HyperionProtocolException(string message, Exception innerException);
+    public const int DefaultChunkSize = 1024 * 1024;
+    public const int DefaultMaxHeaderLength = 64 * 1024;
+
+    public int ChunkSize { get; init; } = DefaultChunkSize;
+    public int MaxHeaderLength { get; init; } = DefaultMaxHeaderLength;
 }
 ```
 
-## 🏗️ Project Structure
+Exceptions that escape the receive/send paths are wrapped in `HyperionProtocolException` &mdash; bad magic, bad chunk order, header out of range, mismatched packet id, premature EOF.
+
+## Performance
+
+Numbers from a typical dev box over loopback (Ryzen-class CPU, single TCP pair):
+
+| Test | Result |
+|---|---|
+| One-way 100 MiB &mdash; chunked `HyperionProtocol` | **~290&ndash;340 MiB/sec** |
+| One-way 100 MiB &mdash; Pipelines path | ~250&ndash;280 MiB/sec |
+| One-way 100 MiB &mdash; `ReceiveStreamingAsync` | **~430&ndash;500 MiB/sec** (no buffering of the full payload) |
+| `SmartHyperionProtocol` lightweight round-trip | ~13&thinsp;000&ndash;14&thinsp;000 ops/sec, ~0.07 ms/op |
+| 100 concurrent clients, single round-trip each | ~40 ms total |
+
+These come straight from the `[Category("Performance")]` NUnit tests in this repo. Run them yourself:
+
+```bash
+dotnet test src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln -c Release \
+    --filter "TestCategory=Performance|TestCategory=Stress" \
+    --logger "console;verbosity=normal"
+```
+
+Each performance test asserts a generous lower throughput floor (30 MiB/sec) to catch regressions without flaking on slow CI.
+
+For accurate, statistically-meaningful measurements there's a separate BenchmarkDotNet project:
+
+```bash
+dotnet run -c Release \
+  --project src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.Benchmarks \
+  --framework net9.0 -- --filter "*"
+```
+
+It includes `OneWayThroughputBenchmarks` (NetworkStream vs Pipelines vs streaming receive across 64 KiB&ndash;64 MiB payloads with `[MemoryDiagnoser]`), `SmartProtocolBenchmarks` (round-trip latency across the lightweight / direct / chunked thresholds), and `ConcurrentClientsBenchmarks` (aggregate throughput at 10 / 50 / 100 clients).
+
+## Project layout
 
 ```
 HyperionProtocol/
-├── 📁 src/
-│   ├── 📁 TechTeaStudio.Protocols.Hyperion/    # 🎯 Main library
-│   │   ├── 📄 HyperionProtocol.cs              # 🚀 Core protocol
-│   │   ├── 📄 PacketHeader.cs                  # 📦 Packet structure
-│   │   ├── 📄 ISerializer.cs                   # 🔄 Serialization interface
-│   │   └── 📄 HyperionProtocolException.cs     # 🚨 Custom exceptions
-│   └── 📁 ConsoleApp/                          # 🖥️ Demo application
-│       ├── 📄 Program.cs                       # 🎮 Demo code
-│       └── 📄 DefaultSerializer.cs             # 📝 Basic serializer
-├── 📁 tests/
-│   └── 📁 TechTeaStudio.Protocols.Hyperion.Tests/  # 🧪 Unit tests
-│       ├── 📄 HyperionProtocolTests.cs         # 🔍 Protocol tests
-│       └── 📄 DefaultSerializerTests.cs        # 📊 Serializer tests
-├── 📄 README.md                                # 📖 This file
-└── 📄 LICENSE                                  # ⚖️ MIT License
+├── src/TechTeaStudio.Protocols.Hyperion/
+│   ├── TechTeaStudio.Protocols.Hyperion.sln
+│   ├── TechTeaStudio.Protocols.Hyperion/             <- NuGet package source
+│   │   ├── Protocols/HyperionProtocol.cs             <- chunked protocol (base)
+│   │   ├── Protocols/SmartHyperionProtocol.cs        <- adaptive framing
+│   │   ├── Protocols/ChunkData.cs
+│   │   ├── ISerializer.cs / DefaultSerializer.cs
+│   │   ├── PacketHeader.cs / ProtocolStats.cs
+│   │   ├── HyperionProtocolOptions.cs
+│   │   └── HyperionProtocolException.cs
+│   ├── TechTeaStudio.Protocols.Hyperion.Tests/       <- NUnit (correctness + perf + stress)
+│   ├── TechTeaStudio.Protocols.Hyperion.Benchmarks/  <- BenchmarkDotNet console app
+│   └── ConsoleTestApp/                                <- smoke test
+├── .github/workflows/dotnet.yml                       <- CI publish (shared TTS workflow)
+├── CHANGELOG.md
+├── LICENSE
+└── README.md
 ```
 
-## 🔧 Configuration
-
-### Chunk Size
-```csharp
-// Default: 1MB (1024 * 1024 bytes)
-private const int ChunkSize = 1024 * 1024;
-```
-
-### Header Limits
-```csharp
-// Maximum header size: 64KB
-private const int MaxHeaderLength = 64 * 1024;
-```
-
-### Timeouts ⏰
-```csharp
-client.ReceiveTimeout = 30000; // 30 seconds
-client.SendTimeout = 30000;    // 30 seconds
-```
-
-## 🤝 Contributing
-
-We welcome contributions! 🎉
-
-1. 🍴 Fork the repository
-2. 🌿 Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. 💾 Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. 📤 Push to the branch (`git push origin feature/amazing-feature`)
-5. 🔄 Open a Pull Request
-
-### Development Setup 👨‍💻
+## Build &amp; test
 
 ```bash
-# Clone repo
-git clone https://github.com/yourusername/HyperionProtocol.git
-cd HyperionProtocol
-
-# Restore packages
-dotnet restore
-
-# Build solution
-dotnet build
-
-# Run tests
-dotnet test
-
-# Run demo
-cd src/ConsoleApp && dotnet run
+dotnet build src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln
+dotnet test  src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln
 ```
 
-## 🔍 Troubleshooting
+The library multi-targets `net6.0;net8.0;net9.0;net10.0`. `net7.0` is intentionally skipped (EOL). The test and benchmark projects target `net8.0;net9.0;net10.0` only &mdash; the NUnit3 test platform is unstable on `net6.0`.
 
-### Common Issues
+## Versioning &amp; release
 
-**🚨 "Stream ended while reading header length"**
-- Ensure server doesn't close connection before client reads response
-- Add proper `FlushAsync()` calls
-- Check network connectivity
+Version lives in `TechTeaStudio.Protocols.Hyperion.csproj` as a 3-part `<Version>X.Y.Z</Version>`. Bump rules:
 
-**🐌 Slow performance with large files**
-- Increase network buffer sizes
-- Consider compression for text data
-- Monitor memory usage
+- Bug fix &rarr; `Z + 1`
+- New feature, source-compatible &rarr; `Y + 1`, reset `Z = 0`
+- Breaking change in public API or wire format &rarr; `X + 1` (after `1.0`), reset `Y = Z = 0`
 
-**❌ Serialization errors**
-- Ensure both ends use compatible serializers
-- Handle null values properly
-- Check data type compatibility
+Commit format is `vX.Y.Z <short description>`. Push to `main` triggers the shared TechTeaStudio NuGet publish workflow, which packs and pushes to nuget.org with `--skip-duplicate`. **Never push to nuget.org manually.**
 
-## 📜 License
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## License
 
-## Acknowledgments
+Licensed under the [MIT License](LICENSE). Copyright &copy; Tech Tea Studio.
 
-- Built with ❤️ using .NET 8-9
-- Special thanks to the RonaldRyan
----
-
-**Made by TechTeaStudio**
-
-⭐ Don't forget to star the repository if you find it useful!
+<p align="center">
+  Built as part of the Hyperion Ecosystem by <a href="https://techteastudio.cc">TechTeaStudio</a>.
+</p>

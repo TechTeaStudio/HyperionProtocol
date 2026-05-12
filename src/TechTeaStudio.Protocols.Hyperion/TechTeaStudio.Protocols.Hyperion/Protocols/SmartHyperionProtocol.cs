@@ -1,279 +1,232 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Net.Sockets;
-using System.Text.Json;
+using System.Threading;
 
 namespace TechTeaStudio.Protocols.Hyperion.Protocols;
 
-/// <summary>Small overhead protocol version.</summary>
-/// <param name="serializer"></param>
-public partial class SmartHyperionProtocol(ISerializer serializer) : HyperionProtocol(serializer)
+/// <summary>
+/// Adaptive protocol that picks the smallest framing for each payload:
+/// <list type="bullet">
+///   <item><description>&lt; 1 KiB — lightweight: [magic:1=0xFF][length:2 BE][data]</description></item>
+///   <item><description>&lt; 64 KiB — direct: [magic:1=0xFE][length:4 BE][data]</description></item>
+///   <item><description>otherwise — chunked: same wire format as <see cref="HyperionProtocol"/></description></item>
+/// </list>
+/// The chunked path starts with a 4-byte big-endian header length whose first byte is always
+/// in the low range (header is JSON, never starts with 0xFE/0xFF), so the receiver can disambiguate
+/// by reading just one byte.
+/// </summary>
+public class SmartHyperionProtocol : HyperionProtocol
 {
-	private const int LightweightThreshold = 1024;      // < 1KB = lightweight
-	private const int DirectThreshold = 64 * 1024;      // < 64KB = direct
-	private const byte LightweightMagic = 0xFF;
-	private const byte DirectMagic = 0xFE;
+    private const int LightweightThreshold = 1024;      // < 1 KiB
+    private const int DirectThreshold = 64 * 1024;      // < 64 KiB
+    private const byte LightweightMagic = 0xFF;
+    private const byte DirectMagic = 0xFE;
 
-	/// <summary>Smart send async.</summary>
-	public override async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
-	{
-		ArgumentNullException.ThrowIfNull(stream);
-		if(!stream.CanWrite)
-			throw new InvalidOperationException("Stream is not writable.");
+    /// <summary>Counters for picked framing modes; updated on each successful send.</summary>
+    public ProtocolStats Stats { get; } = new();
 
-		var data = _serializer.Serialize(message) ?? Array.Empty<byte>();
+    /// <inheritdoc />
+    public SmartHyperionProtocol(ISerializer serializer)
+        : base(serializer) { }
 
-		try
-		{
-			if(data.Length < LightweightThreshold)
-			{
-				await SmartHyperionProtocol.SendLightweightAsync(data, stream, ct).ConfigureAwait(false);
-			}
-			else if(data.Length < DirectThreshold)
-			{
-				await SmartHyperionProtocol.SendDirectAsync(data, stream, ct).ConfigureAwait(false);
-			}
-			else
-			{
-				await base.SendAsync(message, stream, ct).ConfigureAwait(false);
-			}
-		}
-		catch(Exception ex) when(!(ex is OperationCanceledException))
-		{
-			throw new HyperionProtocolException("Failed to send message via smart protocol", ex);
-		}
-	}
+    /// <inheritdoc />
+    public SmartHyperionProtocol(ISerializer serializer, HyperionProtocolOptions options)
+        : base(serializer, options) { }
 
-	/// <summary>Auto change state.</summary>
-	public override async Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default)
-	{
-		ArgumentNullException.ThrowIfNull(stream);
-		if(!stream.CanRead)
-			throw new InvalidOperationException("Stream is not readable.");
+    /// <inheritdoc />
+    public override async Task SendAsync<T>(T message, NetworkStream stream, CancellationToken ct = default)
+    {
+        if (stream is null) throw new ArgumentNullException(nameof(stream));
+        if (!stream.CanWrite)
+            throw new InvalidOperationException("Stream is not writable.");
 
-		try
-		{
-			// Use small array for mode buffer (1 byte - can't use stackalloc across await)
-			var modeBuffer = new byte[1];
-			if(!await ReadExactlyAsync(stream, modeBuffer, ct).ConfigureAwait(false))
-				throw new EndOfStreamException("Stream ended while reading mode byte.");
+        var data = _serializer.Serialize(message) ?? Array.Empty<byte>();
 
-			var mode = modeBuffer[0];
+        try
+        {
+            if (data.Length < LightweightThreshold)
+            {
+                await SendLightweightAsync(data, stream, ct).ConfigureAwait(false);
+                Interlocked.Increment(ref _lightweight);
+                // Saved vs chunked: 4 (length) + ~150 (JSON header) ≈ 154; lightweight uses 3 bytes.
+                Interlocked.Add(ref _bytesSaved, Math.Max(0, 154 - 3));
+            }
+            else if (data.Length < DirectThreshold)
+            {
+                await SendDirectAsync(data, stream, ct).ConfigureAwait(false);
+                Interlocked.Increment(ref _direct);
+                // Saved vs chunked: ~154; direct uses 5 bytes.
+                Interlocked.Add(ref _bytesSaved, Math.Max(0, 154 - 5));
+            }
+            else
+            {
+                await base.SendAsync(message, stream, ct).ConfigureAwait(false);
+                Interlocked.Increment(ref _chunked);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new HyperionProtocolException("Failed to send message via smart protocol", ex);
+        }
+    }
 
-			if(mode == LightweightMagic)
-			{
-				return await ReceiveLightweightAsync<T>(stream, ct).ConfigureAwait(false);
-			}
-			else if(mode == DirectMagic)
-			{
-				return await ReceiveDirectAsync<T>(stream, ct).ConfigureAwait(false);
-			}
-			else
-			{
-				// Use array for header length buffer (can't use stackalloc across await)
-				var headerLengthBuffer = new byte[4];
-				headerLengthBuffer[0] = mode;
+    private long _lightweight;
+    private long _direct;
+    private long _chunked;
+    private long _bytesSaved;
 
-				// Read remaining 3 bytes
-				var remainingMemory = headerLengthBuffer.AsMemory(1, 3);
-				if(!await ReadExactlyAsync(stream, remainingMemory, ct).ConfigureAwait(false))
-					throw new EndOfStreamException("Stream ended while reading header length.");
-				
-				return await ReceiveChunkedAsync<T>(stream, headerLengthBuffer, ct).ConfigureAwait(false);
-			}
-		}
-		catch(Exception ex) when(!(ex is OperationCanceledException || ex is HyperionProtocolException))
-		{
-			throw new HyperionProtocolException("Failed to receive message via smart protocol", ex);
-		}
-	}
+    /// <summary>Refreshes <see cref="Stats"/> from internal counters.</summary>
+    private void SyncStats()
+    {
+        Stats.LightweightMessagesSent = Interlocked.Read(ref _lightweight);
+        Stats.DirectMessagesSent = Interlocked.Read(ref _direct);
+        Stats.ChunkedMessagesSent = Interlocked.Read(ref _chunked);
+        Stats.TotalBytesSaved = Interlocked.Read(ref _bytesSaved);
+    }
 
-	#region Lightweight Protocol
+    /// <inheritdoc />
+    public override async Task<T> ReceiveAsync<T>(NetworkStream stream, CancellationToken ct = default)
+    {
+        if (stream is null) throw new ArgumentNullException(nameof(stream));
+        if (!stream.CanRead)
+            throw new InvalidOperationException("Stream is not readable.");
 
-	private static async Task SendLightweightAsync(byte[] data, NetworkStream stream, CancellationToken ct)
-	{
-		if(data.Length >= LightweightThreshold)
-			throw new ArgumentException($"Data too large for lightweight mode: {data.Length}");
+        try
+        {
+            var modeBuffer = new byte[1];
+            if (!await ReadExactlyAsync(stream, modeBuffer, ct).ConfigureAwait(false))
+                throw new EndOfStreamException("Stream ended while reading mode byte.");
 
-		//[magic:1][length:2][data:N]
-		var buffer = ArrayPool<byte>.Shared.Rent(3 + data.Length);
-		try
-		{
-			var span = buffer.AsSpan(0, 3 + data.Length);
-			span[0] = LightweightMagic;
-			BinaryPrimitives.WriteUInt16BigEndian(span.Slice(1), (ushort)data.Length);
-			data.CopyTo(span.Slice(3));
+            var mode = modeBuffer[0];
 
-			var memory = buffer.AsMemory(0, 3 + data.Length);
-			await stream.WriteAsync(memory, ct).ConfigureAwait(false);
-			await stream.FlushAsync(ct).ConfigureAwait(false);
-		}
-		finally
-		{
-			ArrayPool<byte>.Shared.Return(buffer);
-		}
-	}
+            if (mode == LightweightMagic)
+                return await ReceiveLightweightAsync<T>(stream, ct).ConfigureAwait(false);
 
-	private async Task<T> ReceiveLightweightAsync<T>(NetworkStream stream, CancellationToken ct)
-	{
-		// Use small array for length buffer (2 bytes - can't use stackalloc across await)
-		var lengthBuffer = new byte[2];
-		if(!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
-			throw new EndOfStreamException("Stream ended while reading lightweight length.");
+            if (mode == DirectMagic)
+                return await ReceiveDirectAsync<T>(stream, ct).ConfigureAwait(false);
 
-		var dataLength = BinaryPrimitives.ReadUInt16BigEndian(lengthBuffer);
+            // Chunked: that first byte is actually the high byte of header-length:4.
+            var headerLengthBuffer = new byte[4];
+            headerLengthBuffer[0] = mode;
+            if (!await ReadExactlyAsync(stream, headerLengthBuffer.AsMemory(1, 3), ct).ConfigureAwait(false))
+                throw new EndOfStreamException("Stream ended while reading header length.");
 
-		var data = new byte[dataLength];
-		if(dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
-			throw new EndOfStreamException("Stream ended while reading lightweight data.");
+            var chunks = await ReceiveChunksAsync(stream, headerLengthBuffer, ct).ConfigureAwait(false);
+            var completeData = CombineChunks(chunks);
+            var result = _serializer.Deserialize<T>(completeData);
+            return result ?? throw new HyperionProtocolException("Chunked deserialization returned null.");
+        }
+        catch (Exception ex) when (ex is not (OperationCanceledException or HyperionProtocolException))
+        {
+            throw new HyperionProtocolException("Failed to receive message via smart protocol", ex);
+        }
+    }
 
-		// Use span-based deserialization if available (.NET 10+ optimization)
-		var result = _serializer.Deserialize<T>(data.AsSpan());
-		return result ?? throw new HyperionProtocolException("Lightweight deserialization returned null.");
-	}
+    /// <summary>Returns a snapshot of <see cref="Stats"/>.</summary>
+    public ProtocolStats GetStatsSnapshot()
+    {
+        SyncStats();
+        return new ProtocolStats
+        {
+            LightweightMessagesSent = Stats.LightweightMessagesSent,
+            DirectMessagesSent = Stats.DirectMessagesSent,
+            ChunkedMessagesSent = Stats.ChunkedMessagesSent,
+            TotalBytesSaved = Stats.TotalBytesSaved,
+        };
+    }
 
-	#endregion
+    /// <summary>Resets counters.</summary>
+    public void ResetStats()
+    {
+        Interlocked.Exchange(ref _lightweight, 0);
+        Interlocked.Exchange(ref _direct, 0);
+        Interlocked.Exchange(ref _chunked, 0);
+        Interlocked.Exchange(ref _bytesSaved, 0);
+        Stats.Reset();
+    }
 
-	#region Direct Protocol
+    #region Lightweight (< 1 KiB)
 
-	private static async Task SendDirectAsync(byte[] data, NetworkStream stream, CancellationToken ct)
-	{
-		if(data.Length >= DirectThreshold)
-			throw new ArgumentException($"Data too large for direct mode: {data.Length}");
+    private static async Task SendLightweightAsync(byte[] data, NetworkStream stream, CancellationToken ct)
+    {
+        if (data.Length >= LightweightThreshold)
+            throw new ArgumentException($"Data too large for lightweight mode: {data.Length}");
 
-		//[magic:1][length:4][data:N]
-		// Use small array for header (5 bytes - can't use stackalloc across await)
-		var headerBuffer = new byte[5];
-		headerBuffer[0] = DirectMagic;
-		BinaryPrimitives.WriteInt32BigEndian(headerBuffer.AsSpan(1), data.Length);
+        // [magic:1][length:2 BE][data:N]
+        var buffer = ArrayPool<byte>.Shared.Rent(3 + data.Length);
+        try
+        {
+            var span = buffer.AsSpan(0, 3 + data.Length);
+            span[0] = LightweightMagic;
+            BinaryPrimitives.WriteUInt16BigEndian(span.Slice(1), (ushort)data.Length);
+            data.CopyTo(span.Slice(3));
 
-		await stream.WriteAsync(headerBuffer, ct).ConfigureAwait(false);
+            await stream.WriteAsync(buffer, 0, 3 + data.Length, ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 
-		if(data.Length > 0)
-			await stream.WriteAsync(data, ct).ConfigureAwait(false);
+    private async Task<T> ReceiveLightweightAsync<T>(NetworkStream stream, CancellationToken ct)
+    {
+        var lengthBuffer = new byte[2];
+        if (!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
+            throw new EndOfStreamException("Stream ended while reading lightweight length.");
 
-		await stream.FlushAsync(ct).ConfigureAwait(false);
-	}
+        var dataLength = BinaryPrimitives.ReadUInt16BigEndian(lengthBuffer);
 
-	private async Task<T> ReceiveDirectAsync<T>(NetworkStream stream, CancellationToken ct)
-	{
-		// Use small array for length buffer (4 bytes - can't use stackalloc across await)
-		var lengthBuffer = new byte[4];
-		if(!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
-			throw new EndOfStreamException("Stream ended while reading direct length.");
+        var data = new byte[dataLength];
+        if (dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
+            throw new EndOfStreamException("Stream ended while reading lightweight data.");
 
-		var dataLength = BinaryPrimitives.ReadInt32BigEndian(lengthBuffer);
+        var result = _serializer.Deserialize<T>(data);
+        return result ?? throw new HyperionProtocolException("Lightweight deserialization returned null.");
+    }
 
-		if(dataLength < 0 || dataLength >= DirectThreshold)
-			throw new HyperionProtocolException($"Invalid direct data length: {dataLength}");
+    #endregion
 
-		var data = new byte[dataLength];
-		if(dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
-			throw new EndOfStreamException("Stream ended while reading direct data.");
+    #region Direct (< 64 KiB)
 
-		// Use span-based deserialization if available (.NET 10+ optimization)
-		var result = _serializer.Deserialize<T>(data.AsSpan());
-		return result ?? throw new HyperionProtocolException("Direct deserialization returned null.");
-	}
+    private static async Task SendDirectAsync(byte[] data, NetworkStream stream, CancellationToken ct)
+    {
+        if (data.Length >= DirectThreshold)
+            throw new ArgumentException($"Data too large for direct mode: {data.Length}");
 
-	#endregion
+        // [magic:1][length:4 BE][data:N]
+        var headerBuffer = new byte[5];
+        headerBuffer[0] = DirectMagic;
+        BinaryPrimitives.WriteInt32BigEndian(headerBuffer.AsSpan(1), data.Length);
 
-	#region Chunked Protocol
+        await stream.WriteAsync(headerBuffer, 0, 5, ct).ConfigureAwait(false);
 
-	private async Task<T> ReceiveChunkedAsync<T>(NetworkStream stream, byte[] headerLengthBuffer, CancellationToken ct)
-	{
-		int headerLength = BinaryPrimitives.ReadInt32BigEndian(headerLengthBuffer);
+        if (data.Length > 0)
+            await stream.WriteAsync(data, 0, data.Length, ct).ConfigureAwait(false);
 
-		var chunks = new List<ChunkData>();
-		int totalChunks = int.MaxValue;
-		Guid? expectedPacketId = null;
+        await stream.FlushAsync(ct).ConfigureAwait(false);
+    }
 
-		var headerBytes = new byte[headerLength];
-		if(!await ReadExactlyAsync(stream, headerBytes, ct).ConfigureAwait(false))
-			throw new EndOfStreamException($"Stream ended while reading {headerLength}-byte header.");
+    private async Task<T> ReceiveDirectAsync<T>(NetworkStream stream, CancellationToken ct)
+    {
+        var lengthBuffer = new byte[4];
+        if (!await ReadExactlyAsync(stream, lengthBuffer, ct).ConfigureAwait(false))
+            throw new EndOfStreamException("Stream ended while reading direct length.");
 
-		var firstHeader = JsonSerializer.Deserialize<PacketHeader>(headerBytes)
-			?? throw new HyperionProtocolException("First header deserialized to null.");
+        var dataLength = BinaryPrimitives.ReadInt32BigEndian(lengthBuffer);
 
-		expectedPacketId = firstHeader.PacketId;
-		totalChunks = firstHeader.TotalChunks;
+        if (dataLength < 0 || dataLength >= DirectThreshold)
+            throw new HyperionProtocolException($"Invalid direct data length: {dataLength}");
 
-		var firstData = new byte[firstHeader.DataLength];
-		if(firstHeader.DataLength > 0 && !await ReadExactlyAsync(stream, firstData, ct).ConfigureAwait(false))
-			throw new EndOfStreamException("Stream ended while reading first chunk data.");
+        var data = new byte[dataLength];
+        if (dataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
+            throw new EndOfStreamException("Stream ended while reading direct data.");
 
-		chunks.Add(new ChunkData(firstHeader.ChunkNumber, firstData));
+        var result = _serializer.Deserialize<T>(data);
+        return result ?? throw new HyperionProtocolException("Direct deserialization returned null.");
+    }
 
-		for(int i = 1; i < totalChunks; i++)
-		{
-			ct.ThrowIfCancellationRequested();
-
-			var nextHeaderLengthBuf = new byte[4];
-			if(!await ReadExactlyAsync(stream, nextHeaderLengthBuf, ct).ConfigureAwait(false))
-				throw new EndOfStreamException("Stream ended while reading next header length.");
-
-			int nextHeaderLength = BinaryPrimitives.ReadInt32BigEndian(nextHeaderLengthBuf);
-
-			var nextHeaderBytes = new byte[nextHeaderLength];
-			if(!await ReadExactlyAsync(stream, nextHeaderBytes, ct).ConfigureAwait(false))
-				throw new EndOfStreamException("Stream ended while reading next header.");
-
-			var header = JsonSerializer.Deserialize<PacketHeader>(nextHeaderBytes)
-				?? throw new HyperionProtocolException("Header deserialized to null.");
-
-			var data = new byte[header.DataLength];
-			if(header.DataLength > 0 && !await ReadExactlyAsync(stream, data, ct).ConfigureAwait(false))
-				throw new EndOfStreamException("Stream ended while reading chunk data.");
-
-			chunks.Add(new ChunkData(header.ChunkNumber, data));
-		}
-
-		var completeData = CombineChunks(chunks);
-		var result = _serializer.Deserialize<T>(completeData);
-
-		return result ?? throw new HyperionProtocolException("Chunked deserialization returned null.");
-	}
-
-	private new static byte[] CombineChunks(List<ChunkData> chunks)
-	{
-		int totalLength = chunks.Sum(c => c.Data.Length);
-		var result = new byte[totalLength];
-		int offset = 0;
-
-		foreach(var chunk in chunks.OrderBy(c => c.ChunkNumber))
-		{
-			chunk.Data.CopyTo(result, offset);
-			offset += chunk.Data.Length;
-		}
-
-		return result;
-	}
-
-	#endregion
-
-	#region Helper Methods
-
-	/// <summary>ReadExactly.</summary>
-	private new static async Task<bool> ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
-	{
-		int totalRead = 0;
-		while(totalRead < buffer.Length)
-		{
-			int bytesRead = await stream.ReadAsync(buffer.Slice(totalRead), ct).ConfigureAwait(false);
-			if(bytesRead == 0)
-				return false; // EOF reached
-
-			totalRead += bytesRead;
-		}
-		return true;
-	}
-
-	#endregion
-
-	#region Statistics 
-
-	/// <summary>UsingStatistics.</summary>
-	public ProtocolStats Stats { get; } = new();
-
-	#endregion
+    #endregion
 }
