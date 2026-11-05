@@ -3,6 +3,59 @@
 All notable changes to this package are documented here.
 Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-05
+
+Protocol design review release. The library was walked through a 50-item protocol design checklist
+(architecture, message specification, reliability, security, connection management, performance,
+compatibility, observability and testing); the result is documented in `docs/DESIGN_CHECKLIST.md`,
+the wire format is now formally specified in `docs/SPECIFICATION.md`, and `docs/DESIGN.md` explains
+purpose, scope and positioning. The gaps the review found are closed in this release **without
+changing a byte of the existing wire format**: every frame emitted since 0.1.0 is still accepted,
+and with checksums off a 0.4.0 sender emits headers byte-identical to 0.3.0.
+
+### Added
+- **`HyperionProtocolOptions.MaxMessageSize`** (default 1 GiB): upper bound on one logical message, enforced on send before anything is written and on receive from the *first* header (before a single payload byte is read, using the chunk count it announces) and again as chunks accumulate. Applies to every receive path including streaming; raise it (up to `long.MaxValue`) for larger streamed transfers.
+- **`HyperionProtocolOptions.ReceiveTimeout`** (idle timeout: time waiting for the peer to deliver any bytes, paused while your code processes a streamed chunk) and **`SendTimeout`** (bounds each chunk write and the final flush). Both default to off. Expiry surfaces as `HyperionErrorCode.Timeout` with an inner `TimeoutException`; your own `CancellationToken` always takes precedence and surfaces as `OperationCanceledException`.
+- **`HyperionProtocolOptions.ChunkChecksum`** (`ChunkChecksumMode.Off` / `Emit` / `Required`): optional per-chunk **CRC-32C** carried in the new optional `"Crc32C"` header member and verified before a chunk reaches your code. Receivers verify any checksum that is present regardless of their own mode. Public `Crc32C` helper (`Compute`, `Append`) with SSE4.2 / ARMv8 intrinsics and a table fallback.
+- **`HyperionErrorCode`** and **`HyperionProtocolException.ErrorCode`**: 21 stable codes (`InvalidMagic`, `UnsupportedVersion`, `InvalidHeaderLength`, `MalformedHeader`, `InvalidChunkCount`, `InvalidChunkNumber`, `InvalidDataLength`, `EndFlagMismatch`, `PacketIdMismatch`, `ChunkOutOfOrder`, `MessageTooLarge`, `ChecksumMismatch`, `ChecksumMissing`, `PeerClosed`, `UnexpectedEndOfStream`, `Timeout`, `HandshakeFailed`, `SerializationFailed`, `SendFailed`, `ReceiveFailed`, `Unspecified`). Each documents whether the connection is still usable. New constructors `(HyperionErrorCode, string)` and `(HyperionErrorCode, string, Exception?)`; the old constructors keep working with `Unspecified`.
+- **`HyperionProtocol.SendStreamingAsync(Stream source, long length, Stream destination, CancellationToken)`**: send a payload of any size (a file, a network stream) as one chunked message without buffering it; pairs with `ReceiveStreamingAsync` on the other side for disk-to-disk transfers with `O(ChunkSize)` memory on both ends.
+- **`HyperionProtocol.ReceiveStreamingAsync(PipeReader, CancellationToken)`** for the Pipelines path.
+- **`SmartHyperionProtocol.ReceiveStreamingAsync(Stream, ...)`** override that understands all three framings (lightweight and direct frames are yielded as a single item).
+- **`HyperionDiagnostics`**: a `System.Diagnostics.Metrics` meter (`hyperion.messages.sent/received`, `hyperion.bytes.sent/received`, `hyperion.chunks.sent/received`, tagged by framing mode, and `hyperion.errors` tagged by code and direction) and an `ActivitySource` (one `Hyperion.Send` / `Hyperion.Receive` span per message), both named `TechTeaStudio.Protocols.Hyperion`. Zero cost without listeners.
+- **`PacketHeader.Checksum`** (JSON `"Crc32C"`, omitted when null), **`PacketHeader.IsLastChunk`**, **`PacketHeader.EndFlag`**; public constants `SmartHyperionProtocol.LightweightThreshold`, `DirectThreshold`, `LightweightMagic`, `DirectMagic`; `HyperionProtocol.MaxMessageSize` and `Options` properties.
+- **Documentation**: `docs/DESIGN.md`, `docs/SPECIFICATION.md`, `docs/DESIGN_CHECKLIST.md`; README sections on limits and timeouts, integrity, error handling, security (TLS), observability and operational recipes (message types and correlation, keep-alive, reconnection, graceful shutdown, concurrency, batching, compression, resource limits).
+- **Tests**: `Crc32CTests` (RFC 3720 vectors, hardware vs software, incremental), `LimitsAndValidationTests` (size limits before payload, uniform-chunk rule, error codes, byte-level 0.2.x/0.3.x compatibility, unknown header members, reserved flag bits), `ChecksumTests`, `TimeoutAndDisconnectTests` (idle semantics, slow peers, slow consumers, caller cancellation, send timeout against a non-reading peer, clean vs mid-frame disconnect on every path, handshake failures), `FuzzTests` (750 deterministic cases: random garbage, plausible prefixes, mutated frames, truncation, checksum oracle), `StreamingAndTlsTests` (streaming send to every receive path, file-to-file, Smart streaming receive, `SslStream` end to end with handshake and checksums) and `DiagnosticsTests`. 872 tests in total.
+- **`ChecksumBenchmarks`** in the BenchmarkDotNet project.
+
+### Changed
+- **All `NetworkStream` parameters are now `Stream`** (`SendAsync`, `SendChunkAsync`, `ReceiveAsync`, `ReceiveStreamingAsync`, `ReceiveChunksAsync`, `HandshakeAsync`). `SslStream` (TLS), named pipes, `MemoryStream` and `Pipe.Reader.AsStream()` now work directly. Source-compatible for every caller (a `NetworkStream` is a `Stream`); subclasses that override the old `NetworkStream` signatures must change them to `Stream`.
+- **Receivers enforce the uniform-chunk rule**: in a multi-chunk message every non-final chunk must carry exactly the payload size of chunk 0 and the final chunk 1..that many bytes. Every sender since 0.1.0 produces exactly this, so nothing changes for conforming peers; it is what allows the size limit to be checked before any payload is read.
+- **End-of-stream reporting is uniform across all paths**: a disconnect between messages is `PeerClosed` (the normal end of a session, with an inner `EndOfStreamException` as before), a disconnect inside a frame is `UnexpectedEndOfStream`. `ReceiveStreamingAsync` now wraps EOF in `HyperionProtocolException` like the buffered paths instead of leaking a raw `EndOfStreamException`.
+- **Serializer failures on send** are now wrapped as `HyperionProtocolException` (`SerializationFailed`) instead of escaping as the serializer's own exception; the connection is untouched because nothing was written.
+- **`SendAsync(T, PipeWriter)`** now throws `PeerClosed` when the reader has completed the pipe instead of silently truncating the message; `FlushResult.IsCanceled` surfaces as `OperationCanceledException`.
+- **`SmartHyperionProtocol`** serializes a message once (it used to serialize twice on the chunked path), writes lightweight and direct frames with a single transport write, validates lightweight frame lengths (`< 1024`) like it already did for direct frames, and no longer double-wraps exceptions from the base class.
+- **Chunk header JSON is produced and parsed by a System.Text.Json source generator** (`HyperionJsonContext`): no reflection on the hot path, no first-frame warm-up, trimming/AOT friendly. Output is byte-identical to 0.3.0.
+- **`SendChunkAsync`** writes the length prefix and header in one call and coalesces small frames (header + payload up to 64 KiB) into a single transport write.
+- **Null handling after deserialization** is identical on every path (previously the Smart paths rejected any `null` while the base path allowed `null` for `string` and nullable value types).
+- **`HyperionProtocolOptions.Validate`** also validates `MaxMessageSize`, the timeouts and `ChunkChecksum`.
+- Package tags extended; `InternalsVisibleTo` for the test and benchmark projects.
+
+### Wire format
+- Unchanged and backward compatible with 0.1.x, 0.2.x and 0.3.x in both directions. The optional `"Crc32C"` header member is ignored by older receivers (System.Text.Json skips unknown members) and never emitted unless `ChunkChecksum` is `Emit` or `Required`.
+- Now formally specified in `docs/SPECIFICATION.md`, including the reserved first-byte range `0x80..0xFD` for future frame types and the reserved handshake phase 2 (feature bitmask) for protocol version 2.
+
+### Migration notes (from 0.3.0)
+
+| 0.3.0 | 0.4.0 |
+| --- | --- |
+| `override Task SendAsync<T>(T, NetworkStream, CancellationToken)` (and the other `NetworkStream` overrides) | Change the parameter type to `Stream`. Callers need no change. |
+| Messages above 1 GiB worked if memory allowed | Set `MaxMessageSize` on both sides (for example `long.MaxValue` for unbounded streamed transfers). |
+| `catch (EndOfStreamException)` around `ReceiveStreamingAsync` | `catch (HyperionProtocolException ex) when (ex.ErrorCode is PeerClosed or UnexpectedEndOfStream)`; the `EndOfStreamException` is still the inner exception. |
+| `catch (InvalidOperationException)` for serializer failures on send | `catch (HyperionProtocolException ex) when (ex.ErrorCode == SerializationFailed)`; the original exception is the inner exception. |
+| `SendAsync(T, PipeWriter)` returned silently when the reader had completed | It throws `PeerClosed`. |
+
+---
+
 ## [0.3.0] — 2026-05-13
 
 Feature release — streaming receive, first-class `System.IO.Pipelines` support, and protocol-version negotiation. No breaking changes; the wire format stays backward compatible with `0.2.x` (new `PacketHeader.Version` field is optional, missing == legacy v1).
@@ -93,6 +146,7 @@ Audit, cleanup, and multi-targeting pass. The wire format is **unchanged**; this
 
 - Chunked TCP messaging protocol with pluggable serialization, async/await API, and cancellation support.
 
+[0.4.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.4.0
 [0.3.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.3.0
 [0.2.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.2.0
 [0.1.4]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.1.4

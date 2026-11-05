@@ -11,7 +11,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>TechTeaStudio.Protocols.Hyperion</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Authors>Ronald Ryan</Authors>
     <Company>Tech Tea Studio</Company>
     <Description>High-performance chunked TCP messaging protocol for .NET. Pluggable serialization, adaptive lightweight/direct/chunked modes, and async/await with cancellation.</Description>
@@ -22,19 +22,29 @@
     <Copyright>Copyright © Tech Tea Studio 2026</Copyright>
 
     <PackageReleaseNotes>
-v0.3.0 — Streaming receive, Pipelines support, protocol versioning.
+v0.4.0 - Protocol design review: hard limits, timeouts, integrity, error codes, telemetry, streaming send, Stream/TLS support.
 
 Added:
-  * ReceiveStreamingAsync(NetworkStream) returning IAsyncEnumerable&lt;ReadOnlyMemory&lt;byte&gt;&gt; — stream chunks straight to disk without buffering the full payload.
-  * SendAsync(T, PipeWriter) and ReceiveAsync&lt;T&gt;(PipeReader) — first-class System.IO.Pipelines path for natural backpressure and zero-copy writes.
-  * Protocol-version negotiation: PacketHeader.Version field, ProtocolVersion / MinSupportedProtocolVersion constants, and HandshakeAsync(NetworkStream, localVersion?) helper that exchanges "TTSH" + version with the peer and returns the negotiated minimum.
+  * HyperionProtocolOptions.MaxMessageSize (default 1 GiB), ReceiveTimeout / SendTimeout (idle timeouts, default off) and ChunkChecksum (per-chunk CRC-32C: Off / Emit / Required).
+  * HyperionErrorCode on every HyperionProtocolException (InvalidMagic, MessageTooLarge, ChecksumMismatch, Timeout, PeerClosed, ...).
+  * SendStreamingAsync(Stream source, long length, Stream destination): send files of any size without buffering; pairs with ReceiveStreamingAsync.
+  * ReceiveStreamingAsync(PipeReader) and a SmartHyperionProtocol override of ReceiveStreamingAsync that understands all three framings.
+  * HyperionDiagnostics: System.Diagnostics.Metrics counters and ActivitySource spans (OpenTelemetry-ready).
+  * Crc32C helper (SSE4.2 / ARM intrinsics with table fallback).
+  * docs/DESIGN.md, docs/SPECIFICATION.md and docs/DESIGN_CHECKLIST.md.
 
-Wire format: backward compatible — receivers tolerate headers without the new Version field (v0.2.x senders) and treat them as v1.
+Changed:
+  * All NetworkStream parameters are now Stream, so SslStream (TLS), named pipes and in-memory streams work directly. Source-compatible for callers; subclasses overriding the old signatures must update them.
+  * Receivers enforce the uniform-chunk rule (all non-final chunks carry the size of chunk 0) and MaxMessageSize, both before reading payload bytes.
+  * A clean disconnect at a message boundary is reported as HyperionErrorCode.PeerClosed; a disconnect mid-frame as UnexpectedEndOfStream; ReceiveStreamingAsync now wraps EOF the same way as the buffered paths.
+  * Header JSON is produced by a System.Text.Json source generator (no reflection on the hot path).
+
+Wire format: unchanged and backward compatible with 0.1.x-0.3.x. The optional "Crc32C" header member is ignored by older receivers.
 
 Full changelog: https://github.com/TechTeaStudio/HyperionProtocol/blob/main/CHANGELOG.md
     </PackageReleaseNotes>
 
-    <PackageTags>network;protocol;tcp;sockets;client-server;communication;serialization;async;high-performance;lightweight;TechTeaStudio</PackageTags>
+    <PackageTags>network;protocol;tcp;sockets;client-server;communication;serialization;async;high-performance;lightweight;framing;chunking;streaming;pipelines;crc32c;TechTeaStudio</PackageTags>
 
   </PropertyGroup>
 
@@ -45,6 +55,11 @@ Full changelog: https://github.com/TechTeaStudio/HyperionProtocol/blob/main/CHAN
 
   <ItemGroup>
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TechTeaStudio.Protocols.Hyperion.Tests" />
+    <InternalsVisibleTo Include="TechTeaStudio.Protocols.Hyperion.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>
