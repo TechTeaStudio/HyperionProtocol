@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net6.0;net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net6.0;net8.0;net9.0;net10.0;net11.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
@@ -11,7 +11,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>TechTeaStudio.Protocols.Hyperion</PackageId>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <Authors>Ronald Ryan</Authors>
     <Company>Tech Tea Studio</Company>
     <Description>High-performance chunked TCP messaging protocol for .NET. Pluggable serialization, adaptive lightweight/direct/chunked modes, and async/await with cancellation.</Description>
@@ -22,6 +22,8 @@
     <Copyright>Copyright © Tech Tea Studio 2026</Copyright>
 
     <PackageReleaseNotes>
+v0.4.1 - Added the net11.0 target. No API or wire format changes.
+
 v0.4.0 - Protocol design review: hard limits, timeouts, integrity, error codes, telemetry, streaming send, Stream/TLS support.
 
 Added:

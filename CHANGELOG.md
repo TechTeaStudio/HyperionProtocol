@@ -3,6 +3,11 @@
 All notable changes to this package are documented here.
 Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-11
+
+### Added
+- **`net11.0` target.** The library now multi-targets `net6.0;net8.0;net9.0;net10.0;net11.0`; the test and benchmark projects target `net8.0;net9.0;net10.0;net11.0`. No API or wire format changes.
+
 ## [0.4.0] - 2026-11-05
 
 Protocol design review release. The library was walked through a 50-item protocol design checklist
@@ -146,6 +151,7 @@ Audit, cleanup, and multi-targeting pass. The wire format is **unchanged**; this
 
 - Chunked TCP messaging protocol with pluggable serialization, async/await API, and cancellation support.
 
+[0.4.1]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.4.1
 [0.4.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.4.0
 [0.3.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.3.0
 [0.2.0]: https://github.com/TechTeaStudio/HyperionProtocol/releases/tag/v0.2.0

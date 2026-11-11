@@ -65,7 +65,7 @@ dotnet add package TechTeaStudio.Protocols.Hyperion
 Or pin a specific version in `.csproj`:
 
 ```xml
-<PackageReference Include="TechTeaStudio.Protocols.Hyperion" Version="0.4.0" />
+<PackageReference Include="TechTeaStudio.Protocols.Hyperion" Version="0.4.1" />
 ```
 
 ## Quick start
@@ -586,7 +586,7 @@ dotnet build src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperi
 dotnet test  src/TechTeaStudio.Protocols.Hyperion/TechTeaStudio.Protocols.Hyperion.sln
 ```
 
-The library multi-targets `net6.0;net8.0;net9.0;net10.0`. `net7.0` is intentionally skipped (EOL). The test and benchmark projects target `net8.0;net9.0;net10.0` only - the NUnit3 test platform is unstable on `net6.0`. Test categories: `Performance`, `Stress`, `Fuzz` (filter with `--filter "TestCategory!=Performance&TestCategory!=Stress"` for a quick run).
+The library multi-targets `net6.0;net8.0;net9.0;net10.0;net11.0`. `net7.0` is intentionally skipped (EOL). The test and benchmark projects target `net8.0;net9.0;net10.0;net11.0` only - the NUnit3 test platform is unstable on `net6.0`. Test categories: `Performance`, `Stress`, `Fuzz` (filter with `--filter "TestCategory!=Performance&TestCategory!=Stress"` for a quick run).
 
 ## Versioning &amp; release
 
