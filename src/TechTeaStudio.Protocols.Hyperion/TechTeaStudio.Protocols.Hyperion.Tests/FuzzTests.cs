@@ -103,9 +103,121 @@ public class FuzzTests
         }
     }
 
-    private static async Task ExpectPayloadOrProtocolException(byte[] bytes)
+    [Test]
+    public async Task CompressedFrames_Unmutated_RoundTripOrAreRefused([Range(0, 19)] int seed)
     {
-        foreach (var receive in Receivers())
+        var random = new Random(11000 + seed);
+        var payload = TestTransport.RandomBytes(random.Next(1, 120), seed);
+        var bytes = Frames.Concat(Frames.CompressedChunks(payload, chunkSize: 16, withChecksum: seed % 2 == 0));
+
+        foreach (var receive in Receivers(CompressedOptions()))
+        {
+            if (HyperionProtocol.IsCompressionSupported)
+            {
+                Assert.That(await receive(bytes).WaitAsync(Deadline), Is.EqualTo(payload));
+            }
+            else
+            {
+                // No codec on this target: the receiver is Off and must refuse from the first header.
+                var ex = Assert.ThrowsAsync<HyperionProtocolException>(() => receive(bytes).WaitAsync(Deadline));
+                Assert.That(ex!.ErrorCode, Is.EqualTo(HyperionErrorCode.CompressionNotSupported), ex.ToString());
+            }
+        }
+    }
+
+    [Test]
+    public async Task MutatedCompressedFrames_NeverEscapeAsForeignException([Range(0, 299)] int seed)
+    {
+        var random = new Random(13000 + seed);
+        var payload = TestTransport.RandomBytes(random.Next(1, 120), seed);
+        var bytes = Frames.Concat(Frames.CompressedChunks(payload, chunkSize: 16, withChecksum: seed % 2 == 0));
+
+        int flips = random.Next(1, 4);
+        for (int i = 0; i < flips; i++)
+            bytes[random.Next(bytes.Length)] ^= (byte)random.Next(1, 256);
+
+        await ExpectPayloadOrProtocolException(bytes, Receivers(CompressedOptions()));
+        await ExpectPayloadOrProtocolException(bytes, Receivers());
+    }
+
+    [Test]
+    public async Task MutatedCompressedPayloadBytes_NeverEscapeAsForeignException([Range(0, 199)] int seed)
+    {
+        // Mutate only the Zstandard bytes (headers stay valid, no checksum), so every mutation reaches the decoder.
+        var random = new Random(15000 + seed);
+        var content = TestTransport.RandomBytes(random.Next(1, 200), seed);
+        var wire = Frames.ZstdRawFrame(content);
+
+        int flips = random.Next(1, 6);
+        for (int i = 0; i < flips; i++)
+            wire[random.Next(wire.Length)] ^= (byte)random.Next(1, 256);
+        if (seed % 4 == 0)
+            wire = wire.AsSpan(0, random.Next(1, wire.Length)).ToArray();
+
+        var bytes = Frames.CompressedChunk(Guid.NewGuid(), 0, 1, wire, rawLength: content.Length);
+        var options = new HyperionProtocolOptions
+        {
+            ChunkSize = 256,
+            ChunkCompression = HyperionProtocol.IsCompressionSupported ? ChunkCompressionMode.Accept : ChunkCompressionMode.Off,
+        };
+
+        foreach (var receive in Receivers(options))
+        {
+            try
+            {
+                var result = await receive(bytes).WaitAsync(Deadline);
+                Assert.That(result, Has.Length.EqualTo(content.Length), "a decoded chunk always has exactly RawLength bytes");
+            }
+            catch (HyperionProtocolException)
+            {
+            }
+        }
+    }
+
+    [Test]
+    public async Task WithChecksums_CompressedPayloadCorruptionIsAlwaysDetected([Range(0, 199)] int seed)
+    {
+        var random = new Random(17000 + seed);
+        var payload = TestTransport.RandomBytes(random.Next(1, 120), seed);
+        var chunks = Frames.CompressedChunks(payload, chunkSize: 16, withChecksum: true);
+        var bytes = Frames.Concat(chunks);
+
+        // Flip one byte of one chunk's on-wire payload. The checksum covers exactly those bytes (the Zstandard frame
+        // for a compressed chunk), not the header: a flip inside the header is outside what CRC-32C promises.
+        int target = random.Next(chunks.Length);
+        int payloadLength = Frames.Parse(chunks[target]).Single().Payload.Length;
+        int chunkEnd = chunks.Take(target + 1).Sum(c => c.Length);
+        bytes[chunkEnd - 1 - random.Next(payloadLength)] ^= (byte)random.Next(1, 256);
+
+        foreach (var receive in Receivers(CompressedOptions()))
+        {
+            try
+            {
+                var result = await receive(bytes).WaitAsync(Deadline);
+                Assert.Fail($"a corrupted on-wire payload was accepted ({result.Length} bytes returned)");
+            }
+            catch (HyperionProtocolException ex)
+            {
+                // Checksum first: the decoder is never reached. Without a codec the header is refused before that.
+                Assert.That(ex.ErrorCode, Is.EqualTo(HyperionProtocol.IsCompressionSupported
+                    ? HyperionErrorCode.ChecksumMismatch
+                    : HyperionErrorCode.CompressionNotSupported), ex.ToString());
+            }
+        }
+    }
+
+    /// <summary>Chunk size 64 leaves room for a 16-byte chunk wrapped in a raw-block Zstandard frame (25 bytes).</summary>
+    private static HyperionProtocolOptions CompressedOptions() => new()
+    {
+        ChunkSize = 64,
+        ChunkCompression = HyperionProtocol.IsCompressionSupported ? ChunkCompressionMode.Accept : ChunkCompressionMode.Off,
+    };
+
+    private static Task ExpectPayloadOrProtocolException(byte[] bytes) => ExpectPayloadOrProtocolException(bytes, Receivers());
+
+    private static async Task ExpectPayloadOrProtocolException(byte[] bytes, IEnumerable<Func<byte[], Task<byte[]>>> receivers)
+    {
+        foreach (var receive in receivers)
         {
             try
             {
@@ -119,8 +231,10 @@ public class FuzzTests
     }
 
     private static IEnumerable<Func<byte[], Task<byte[]>>> Receivers()
+        => Receivers(new HyperionProtocolOptions { ChunkSize = 16, ChunkChecksum = ChunkChecksumMode.Off });
+
+    private static IEnumerable<Func<byte[], Task<byte[]>>> Receivers(HyperionProtocolOptions options)
     {
-        var options = new HyperionProtocolOptions { ChunkSize = 16, ChunkChecksum = ChunkChecksumMode.Off };
         var baseProtocol = new HyperionProtocol(new DefaultSerializer(), options);
         var smart = new SmartHyperionProtocol(new DefaultSerializer(), options);
 

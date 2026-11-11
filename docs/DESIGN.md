@@ -128,7 +128,7 @@ clients, or RPC tooling.
 
 ### 4.1 Costs you accept
 
-- Chunked frames carry a JSON header of roughly 120 to 160 bytes. On a 1 MiB chunk that is 0.015%
+- Chunked frames carry a JSON header of roughly 120 to 160 bytes (about 35 more on a compressed chunk). On a 1 MiB chunk that is 0.015%
   and it buys a human-readable, trivially extensible header; on small messages the adaptive framing
   avoids it entirely.
 - No multiplexing means head-of-line blocking within a connection: a 1 GiB transfer delays a small
@@ -147,12 +147,15 @@ clients, or RPC tooling.
    exception type can escape and that a receiver can never hang on bad input.
 3. **No state in the library.** Connection state lives in the stream. This makes instances shareable,
    reconnection trivial, and the threading contract simple: one sender and one receiver per connection.
-4. **Pay only for what you use.** Checksums are off by default, telemetry costs nothing unless
-   something listens, timeouts are off unless configured, and an `Activity` is never allocated
-   without a listener.
+4. **Pay only for what you use.** Checksums and compression are off by default, telemetry costs
+   nothing unless something listens, timeouts are off unless configured, and an `Activity` is never
+   allocated without a listener.
 5. **Compatibility by construction.** Receivers ignore unknown header members and reserved flag bits;
    `Version` 0 is read as 1; features are added as optional members. The protocol version only moves
    when a frame becomes unreadable to an older peer, and the handshake exists to negotiate that.
+   Version 2 (0.5.0, compressed chunks) is the first such move, and it is confined to the messages
+   that need it: a sender emits the lowest version that can express a message, so everything
+   uncompressed is still version 1.
 
 ## 6. What the design review changed (0.4.0)
 
@@ -171,7 +174,8 @@ Walking the 50-item checklist against 0.3.0 produced three kinds of findings:
 - **Items that are designed but intentionally deferred.** Control frames (ping/close), feature
   negotiation beyond the version number, per-frame compression. They need a new frame type and a
   negotiated capability, which is exactly what the reserved magic byte range and the two-phase
-  handshake extension in the specification are for.
+  handshake extension in the specification are for. (Per-chunk compression has since shipped in
+  0.5.0 by a shorter route; see section 7.)
 
 ## 7. Roadmap
 
@@ -180,11 +184,24 @@ Ordered by how much they change the wire:
 1. **Session helper (no wire change).** A `HyperionConnection` type that owns a stream, serializes
    sends, runs a receive loop, applies a reconnection policy and raises typed events. Everything it
    needs already exists in 0.4.0.
-2. **Handshake phase 2 (compatible).** After both peers agree on a version >= 2, exchange a 32-bit
-   feature bitmask. Older peers never see the second phase.
+2. **Handshake phase 2 (compatible).** After both peers agree on a version >= 3, exchange a 32-bit
+   feature bitmask. Older peers never see the second phase. (This was planned against version 2
+   until 0.5.0 used that number for compressed chunks.)
 3. **Control frames (needs phase 2).** Magic bytes in the reserved `0x80..0xFD` range for
    ping/pong, graceful close and "go away", enabling protocol-level heartbeats and clean shutdown.
-4. **Per-chunk compression (compatible, needs phase 2 to be safe).** An optional `Encoding` header
-   member; receivers that do not understand it must have declined the feature in the handshake.
+4. **Per-chunk compression: delivered in 0.5.0, without handshake negotiation.** Chunked frames can
+   carry a Zstandard frame per chunk (`Compression` and `RawLength` header members,
+   `ChunkCompression` option, .NET 11). The original plan made it wait for phase 2 so that a peer
+   could decline it. It shipped earlier because the same safety is reached another way: a message
+   offered to the compressor carries `Version: 2`, and every receiver that cannot read it fails
+   loudly on its first chunk (`UnsupportedVersion` from libraries up to 0.4.1,
+   `CompressionNotSupported` from a 0.5.0 receiver that has it off) instead of passing compressed
+   bytes to the serializer. What negotiation would have added is automatic fallback, and that is
+   the cost of this route: **the application must know its peer**. Turn `Compress` on only towards
+   peers deployed with `Accept` or `Compress`, the way both ends already have to agree on
+   `ChunkSize`. Each chunk is an independent frame with no dictionary, which keeps streaming at
+   `O(ChunkSize)` memory, lets a chunk that does not shrink go out raw, and bounds decompression by
+   `RawLength <= ChunkSize`. If phase 2 arrives, a feature bit can make the same wire format
+   self-configuring without changing it.
 5. **Checksummed small frames (compatible via new magic bytes).** Lightweight/direct variants that
    carry a CRC-32C for links without TLS.

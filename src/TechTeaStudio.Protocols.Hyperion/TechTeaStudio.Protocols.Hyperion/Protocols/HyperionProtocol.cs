@@ -25,8 +25,25 @@ public class HyperionProtocol
     /// <summary>Protocol magic identifier ("TTS").</summary>
     public const string ProtocolMagic = "TTS";
 
-    /// <summary>Current wire-protocol revision emitted by this library.</summary>
+    /// <summary>
+    /// Wire-protocol revision this library emits for every frame except the chunks of a message it attempted to
+    /// compress, and the version <see cref="HandshakeAsync"/> advertises by default.
+    /// </summary>
     public const int ProtocolVersion = 1;
+
+    /// <summary>
+    /// Highest wire-protocol revision this library accepts. Revision 2 (library 0.5.0) is revision 1 plus the
+    /// <see cref="PacketHeader.Compression"/> and <see cref="PacketHeader.RawLength"/> header members; it is emitted
+    /// only for messages sent with <see cref="ChunkCompressionMode.Compress"/> at or above the threshold.
+    /// </summary>
+    public const int MaxSupportedProtocolVersion = 2;
+
+    /// <summary>
+    /// Whether this build and platform can compress and decompress chunks: <c>true</c> on .NET 11 or later outside
+    /// the browser and WASI, <c>false</c> everywhere else. When <c>false</c>, only
+    /// <see cref="ChunkCompressionMode.Off"/> is accepted by the constructor.
+    /// </summary>
+    public static bool IsCompressionSupported => ZstdCodec.IsSupported;
 
     /// <summary>Minimum wire-protocol revision this library accepts. <c>0</c> means legacy/unversioned.</summary>
     public const int MinSupportedProtocolVersion = 0;
@@ -98,12 +115,18 @@ public class HyperionProtocol
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length), length, "Length must be >= 0.");
 
         int totalChunks = PrepareSend(length);
+        bool compress = ShouldCompress(length);
+        int version = compress ? MaxSupportedProtocolVersion : ProtocolVersion;
 
         using var activity = HyperionDiagnostics.StartSend(ChunkedMode, length);
         using var guard = OperationGuard.Create(_options.SendTimeout, ct);
         var buffer = BufferPool.Rent(_options.ChunkSize);
+        byte[]? scratch = null;
         try
         {
+            if (compress)
+                scratch = BufferPool.Rent((int)Math.Min(_options.ChunkSize, length));
+
             var packetId = Guid.NewGuid();
             long remaining = length;
 
@@ -123,9 +146,11 @@ public class HyperionProtocol
                 }
                 remaining -= size;
 
-                var header = BuildHeader(packetId, i, totalChunks, slice.Span);
+                // Compression runs before the guard is armed: SendTimeout bounds the transport write only.
+                var wire = EncodeChunk(slice, scratch, out int? rawLength);
+                var header = BuildHeader(packetId, i, totalChunks, wire.Span, version, rawLength);
                 guard.Arm();
-                await SendChunkAsync(destination, header, slice, guard.Token).ConfigureAwait(false);
+                await SendChunkAsync(destination, header, wire, guard.Token).ConfigureAwait(false);
                 guard.Disarm();
             }
 
@@ -151,6 +176,8 @@ public class HyperionProtocol
         finally
         {
             BufferPool.Return(buffer);
+            if (scratch is not null)
+                BufferPool.Return(scratch);
         }
     }
 
@@ -279,11 +306,17 @@ public class HyperionProtocol
 
         var data = SerializePayload(message);
         int totalChunks = PrepareSend(data.Length);
+        bool compress = ShouldCompress(data.Length);
+        int version = compress ? MaxSupportedProtocolVersion : ProtocolVersion;
 
         using var activity = HyperionDiagnostics.StartSend(ChunkedMode, data.Length);
         using var guard = OperationGuard.Create(_options.SendTimeout, ct);
+        byte[]? scratch = null;
         try
         {
+            if (compress)
+                scratch = BufferPool.Rent(Math.Min(_options.ChunkSize, data.Length));
+
             var packetId = Guid.NewGuid();
 
             for (int i = 0; i < totalChunks; i++)
@@ -292,7 +325,8 @@ public class HyperionProtocol
 
                 int offset = i * _options.ChunkSize;
                 int size = Math.Min(_options.ChunkSize, data.Length - offset);
-                WriteFrame(writer, packetId, i, totalChunks, data.AsSpan(offset, size));
+                var wire = EncodeChunk(data.AsMemory(offset, size), scratch, out int? rawLength);
+                WriteFrame(writer, packetId, i, totalChunks, wire.Span, version, rawLength);
 
                 guard.Arm();
                 var flush = await writer.FlushAsync(guard.Token).ConfigureAwait(false);
@@ -321,6 +355,11 @@ public class HyperionProtocol
         {
             throw HyperionDiagnostics.RecordError(activity,
                 new HyperionProtocolException(HyperionErrorCode.SendFailed, "Failed to send via PipeWriter.", ex), "send");
+        }
+        finally
+        {
+            if (scratch is not null)
+                BufferPool.Return(scratch);
         }
     }
 
@@ -369,9 +408,9 @@ public class HyperionProtocol
             yield return chunk;
     }
 
-    private void WriteFrame(PipeWriter writer, Guid packetId, int chunkIndex, int totalChunks, ReadOnlySpan<byte> payload)
+    private void WriteFrame(PipeWriter writer, Guid packetId, int chunkIndex, int totalChunks, ReadOnlySpan<byte> payload, int version, int? rawLength)
     {
-        var header = BuildHeader(packetId, chunkIndex, totalChunks, payload);
+        var header = BuildHeader(packetId, chunkIndex, totalChunks, payload, version, rawLength);
         var headerJson = SerializeHeader(header);
 
         var span = writer.GetSpan(4 + headerJson.Length);
@@ -455,11 +494,17 @@ public class HyperionProtocol
     private protected async Task SendChunkedAsync(byte[] data, Stream stream, CancellationToken ct)
     {
         int totalChunks = PrepareSend(data.Length);
+        bool compress = ShouldCompress(data.Length);
+        int version = compress ? MaxSupportedProtocolVersion : ProtocolVersion;
 
         using var activity = HyperionDiagnostics.StartSend(ChunkedMode, data.Length);
         using var guard = OperationGuard.Create(_options.SendTimeout, ct);
+        byte[]? scratch = null;
         try
         {
+            if (compress)
+                scratch = BufferPool.Rent(Math.Min(_options.ChunkSize, data.Length));
+
             var packetId = Guid.NewGuid();
 
             for (int i = 0; i < totalChunks; i++)
@@ -468,11 +513,13 @@ public class HyperionProtocol
 
                 int offset = i * _options.ChunkSize;
                 int size = Math.Min(_options.ChunkSize, data.Length - offset);
-                var slice = data.AsMemory(offset, size);
-                var header = BuildHeader(packetId, i, totalChunks, slice.Span);
+
+                // Compression runs before the guard is armed: SendTimeout bounds the transport write only.
+                var wire = EncodeChunk(data.AsMemory(offset, size), scratch, out int? rawLength);
+                var header = BuildHeader(packetId, i, totalChunks, wire.Span, version, rawLength);
 
                 guard.Arm();
-                await SendChunkAsync(stream, header, slice, guard.Token).ConfigureAwait(false);
+                await SendChunkAsync(stream, header, wire, guard.Token).ConfigureAwait(false);
                 guard.Disarm();
             }
 
@@ -495,6 +542,41 @@ public class HyperionProtocol
             throw HyperionDiagnostics.RecordError(activity,
                 new HyperionProtocolException(HyperionErrorCode.SendFailed, "Failed to send message.", ex), "send");
         }
+        finally
+        {
+            if (scratch is not null)
+                BufferPool.Return(scratch);
+        }
+    }
+
+    /// <summary>
+    /// Whether the chunks of an outbound message of <paramref name="payloadLength"/> bytes are offered to the
+    /// compressor. Such a message is sent as protocol version 2, whether or not any chunk ends up compressed.
+    /// </summary>
+    private bool ShouldCompress(long payloadLength)
+        => _options.ChunkCompression == ChunkCompressionMode.Compress
+           && payloadLength > 0
+           && payloadLength >= _options.CompressionThreshold;
+
+    /// <summary>
+    /// Returns the bytes to put on the wire for one chunk. With a <paramref name="scratch"/> buffer (the message is
+    /// being compressed) the chunk is compressed into it; when the result is strictly smaller it is returned and
+    /// <paramref name="rawLength"/> is the uncompressed length. Otherwise the chunk goes out raw and
+    /// <paramref name="rawLength"/> is <c>null</c>. The returned memory may alias <paramref name="scratch"/> and is
+    /// valid until the next call with the same buffer.
+    /// </summary>
+    private static ReadOnlyMemory<byte> EncodeChunk(ReadOnlyMemory<byte> chunk, byte[]? scratch, out int? rawLength)
+    {
+        rawLength = null;
+        if (scratch is null || chunk.Length < 2)
+            return chunk;
+
+        // A destination one byte shorter than the input turns "did not shrink" into "did not fit".
+        if (!ZstdCodec.TryCompress(chunk.Span, scratch.AsSpan(0, chunk.Length - 1), out int written))
+            return chunk;
+
+        rawLength = chunk.Length;
+        return scratch.AsMemory(0, written);
     }
 
     /// <summary>Reads every chunk of one message into memory.</summary>
@@ -584,22 +666,45 @@ public class HyperionProtocol
                 BufferPool.Return(headerBuf);
             }
 
+            // After this call the header is known to be consistent, including (for a compressed chunk)
+            // Compression == "zstd" and 1 <= RawLength <= ChunkSize.
             TrackChunk(state, header);
 
             byte[] data;
-            if (header.DataLength > 0)
+            if (header.Compression is not null)
+            {
+                // The on-wire bytes are only needed until they are decompressed, so they live in a pooled buffer.
+                // The checksum covers them as transmitted and is verified first: corrupted bytes never reach the decoder.
+                var wire = BufferPool.Rent(header.DataLength);
+                try
+                {
+                    var wireMemory = wire.AsMemory(0, header.DataLength);
+                    int read = await source.ReadExactlyAsync(wireMemory, guard).ConfigureAwait(false);
+                    if (read < header.DataLength)
+                        throw EndOfStreamError(read, header.DataLength, "chunk payload", atMessageBoundary: false);
+
+                    VerifyChecksum(header, wireMemory.Span);
+                    data = ZstdCodec.Decompress(wireMemory.Span, header.RawLength!.Value, header.ChunkNumber);
+                }
+                finally
+                {
+                    BufferPool.Return(wire);
+                }
+            }
+            else if (header.DataLength > 0)
             {
                 data = new byte[header.DataLength];
                 int read = await source.ReadExactlyAsync(data, guard).ConfigureAwait(false);
                 if (read < data.Length)
                     throw EndOfStreamError(read, data.Length, "chunk payload", atMessageBoundary: false);
+                VerifyChecksum(header, data);
             }
             else
             {
                 data = Array.Empty<byte>();
+                VerifyChecksum(header, data);
             }
 
-            VerifyChecksum(header, data);
             state.Received++;
             return (header, data);
         }
@@ -613,20 +718,50 @@ public class HyperionProtocol
         }
     }
 
-    /// <summary>Applies the per-message rules on top of <see cref="ValidateHeader"/> and advances the reassembly state.</summary>
+    /// <summary>
+    /// Applies the per-message rules on top of <see cref="ValidateHeader"/> and advances the reassembly state.
+    /// Everything here is decided from the header alone, before a payload byte is read or allocated.
+    /// </summary>
     private void TrackChunk(ReassemblyState state, PacketHeader header)
     {
         ValidateHeader(header, state.PacketId, state.TotalChunks, state.Received, _options.ChunkSize);
+
+        // The chunk's logical (uncompressed) length: what the uniform-chunk rule and MaxMessageSize are about.
+        int length = header.DataLength;
+        if (header.Compression is not null)
+        {
+            if (_options.ChunkCompression == ChunkCompressionMode.Off)
+            {
+                throw new HyperionProtocolException(HyperionErrorCode.CompressionNotSupported,
+                    $"Chunk {header.ChunkNumber} is compressed ('{header.Compression}') but ChunkCompression is Off on this receiver.");
+            }
+            if (!string.Equals(header.Compression, PacketHeader.ZstandardCompression, StringComparison.Ordinal))
+            {
+                throw new HyperionProtocolException(HyperionErrorCode.CompressionNotSupported,
+                    $"Chunk {header.ChunkNumber} uses unknown compression '{header.Compression}'. Supported: '{PacketHeader.ZstandardCompression}'.");
+            }
+            if (header.RawLength is not int rawLength || rawLength < 1 || rawLength > _options.ChunkSize)
+            {
+                throw new HyperionProtocolException(HyperionErrorCode.InvalidDataLength,
+                    $"Compressed chunk {header.ChunkNumber} has RawLength {header.RawLength?.ToString() ?? "(absent)"}; expected 1..{_options.ChunkSize}.");
+            }
+            if (header.DataLength == 0)
+            {
+                throw new HyperionProtocolException(HyperionErrorCode.InvalidDataLength,
+                    $"Compressed chunk {header.ChunkNumber} has an empty payload.");
+            }
+            length = rawLength;
+        }
 
         if (state.PacketId is null)
         {
             state.PacketId = header.PacketId;
             state.TotalChunks = header.TotalChunks;
-            state.FirstChunkLength = header.DataLength;
+            state.FirstChunkLength = length;
 
             if (header.TotalChunks > 1)
             {
-                if (header.DataLength == 0)
+                if (length == 0)
                 {
                     throw new HyperionProtocolException(HyperionErrorCode.InvalidDataLength,
                         "The first chunk of a multi-chunk message must not be empty.");
@@ -634,36 +769,36 @@ public class HyperionProtocol
 
                 // Non-final chunks all carry FirstChunkLength bytes and the final one at least 1, so the smallest
                 // message this header can describe is known before a single payload byte is read.
-                long minimumTotal = ((long)header.TotalChunks - 1) * header.DataLength + 1;
+                long minimumTotal = ((long)header.TotalChunks - 1) * length + 1;
                 if (minimumTotal > _options.MaxMessageSize)
                 {
                     throw new HyperionProtocolException(HyperionErrorCode.MessageTooLarge,
-                        $"Message announces {header.TotalChunks} chunks of {header.DataLength} bytes (at least {minimumTotal} bytes), " +
+                        $"Message announces {header.TotalChunks} chunks of {length} bytes (at least {minimumTotal} bytes), " +
                         $"exceeding MaxMessageSize ({_options.MaxMessageSize} bytes).");
                 }
             }
         }
         else if (!header.IsLastChunk)
         {
-            if (header.DataLength != state.FirstChunkLength)
+            if (length != state.FirstChunkLength)
             {
                 throw new HyperionProtocolException(HyperionErrorCode.InvalidDataLength,
-                    $"Chunk {header.ChunkNumber} carries {header.DataLength} bytes but every non-final chunk must carry " +
+                    $"Chunk {header.ChunkNumber} carries {length} bytes but every non-final chunk must carry " +
                     $"{state.FirstChunkLength} bytes (the size of chunk 0).");
             }
         }
-        else if (header.DataLength == 0 || header.DataLength > state.FirstChunkLength)
+        else if (length == 0 || length > state.FirstChunkLength)
         {
             throw new HyperionProtocolException(HyperionErrorCode.InvalidDataLength,
-                $"Final chunk {header.ChunkNumber} carries {header.DataLength} bytes; expected 1..{state.FirstChunkLength}.");
+                $"Final chunk {header.ChunkNumber} carries {length} bytes; expected 1..{state.FirstChunkLength}.");
         }
 
-        if (state.TotalBytes + header.DataLength > _options.MaxMessageSize)
+        if (state.TotalBytes + length > _options.MaxMessageSize)
         {
             throw new HyperionProtocolException(HyperionErrorCode.MessageTooLarge,
                 $"Message exceeds MaxMessageSize ({_options.MaxMessageSize} bytes) at chunk {header.ChunkNumber}.");
         }
-        state.TotalBytes += header.DataLength;
+        state.TotalBytes += length;
 
         if (header.Checksum is null && _options.ChunkChecksum == ChunkChecksumMode.Required)
         {
@@ -681,22 +816,29 @@ public class HyperionProtocol
         if (actual != expected)
         {
             throw new HyperionProtocolException(HyperionErrorCode.ChecksumMismatch,
-                $"Chunk {header.ChunkNumber} checksum mismatch: header says 0x{expected:X8}, payload hashes to 0x{actual:X8}.");
+                $"Chunk {header.ChunkNumber} checksum mismatch: header says 0x{expected:X8}, the on-wire payload hashes to 0x{actual:X8}.");
         }
     }
 
-    private PacketHeader BuildHeader(Guid packetId, int chunkIndex, int totalChunks, ReadOnlySpan<byte> payload)
+    /// <summary>
+    /// Builds the header for one chunk. <paramref name="wirePayload"/> is what follows the header on the wire (the
+    /// compressed bytes when <paramref name="rawLength"/> is set), so <c>DataLength</c> and the checksum describe
+    /// exactly the transmitted bytes.
+    /// </summary>
+    private PacketHeader BuildHeader(Guid packetId, int chunkIndex, int totalChunks, ReadOnlySpan<byte> wirePayload, int version, int? rawLength)
     {
         return new PacketHeader
         {
-            Version = ProtocolVersion,
+            Version = version,
             Magic = ProtocolMagic,
             PacketId = packetId,
             ChunkNumber = chunkIndex,
             TotalChunks = totalChunks,
-            DataLength = payload.Length,
+            DataLength = wirePayload.Length,
             Flags = chunkIndex == totalChunks - 1 ? PacketHeader.EndFlag : (byte)0,
-            Checksum = _options.ChunkChecksum == ChunkChecksumMode.Off ? null : Crc32C.Compute(payload),
+            Checksum = _options.ChunkChecksum == ChunkChecksumMode.Off ? null : Crc32C.Compute(wirePayload),
+            Compression = rawLength is null ? null : PacketHeader.ZstandardCompression,
+            RawLength = rawLength,
         };
     }
 
@@ -964,10 +1106,10 @@ public class HyperionProtocol
 
         // Version 0 is legacy (pre-0.3.0 senders that did not emit the field).
         int effectiveVersion = header.Version == 0 ? 1 : header.Version;
-        if (effectiveVersion < MinSupportedProtocolVersion || effectiveVersion > ProtocolVersion)
+        if (effectiveVersion < MinSupportedProtocolVersion || effectiveVersion > MaxSupportedProtocolVersion)
         {
             throw new HyperionProtocolException(HyperionErrorCode.UnsupportedVersion,
-                $"Unsupported protocol version {header.Version}. This library accepts {MinSupportedProtocolVersion}..{ProtocolVersion}.");
+                $"Unsupported protocol version {header.Version}. This library accepts {MinSupportedProtocolVersion}..{MaxSupportedProtocolVersion}.");
         }
 
         if (header.TotalChunks <= 0)

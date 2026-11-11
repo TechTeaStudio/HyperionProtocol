@@ -18,6 +18,11 @@ namespace TechTeaStudio.Protocols.Hyperion.Protocols;
 /// <remarks>
 /// The <see cref="Stream"/> overloads of <c>SendAsync</c>, <c>ReceiveAsync</c> and <c>ReceiveStreamingAsync</c> speak all three
 /// framings. The <see cref="System.IO.Pipelines"/> overloads are inherited unchanged and speak chunked framing only.
+/// <para>Compression (<see cref="HyperionProtocolOptions.ChunkCompression"/>) applies to the chunked path only, which
+/// this class inherits as is: with <see cref="ChunkCompressionMode.Compress"/> a payload of 64 KiB or more is
+/// compressed chunk by chunk, while lightweight and direct frames are never compressed and stay byte-identical to
+/// compression off. Through the <see cref="Stream"/> overloads <see cref="HyperionProtocolOptions.CompressionThreshold"/>
+/// therefore only matters when it is above <see cref="DirectThreshold"/>.</para>
 /// </remarks>
 public class SmartHyperionProtocol : HyperionProtocol
 {

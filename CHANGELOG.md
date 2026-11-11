@@ -3,6 +3,38 @@
 All notable changes to this package are documented here.
 Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-11
+
+Opt-in per-chunk Zstandard compression of chunked frames, on .NET 11. It is off by default: with default
+options a 0.5.0 sender emits frames byte-identical to 0.4.1 and the library behaves exactly as before on
+every target framework. Compression is not negotiated; a compressed message carries protocol version 2,
+so a peer that cannot read it fails on the first chunk instead of handing compressed bytes to the serializer.
+
+### Added
+- **`HyperionProtocolOptions.ChunkCompression`** (`ChunkCompressionMode.Off` / `Accept` / `Compress`, default `Off`). `Off` never emits compressed chunks and rejects incoming ones; `Accept` never emits them but decompresses incoming ones; `Compress` compresses the chunks of messages at or above the threshold and also accepts. Each chunk is compressed on its own as one complete Zstandard frame (RFC 8878, no dictionary, no state across chunks), so streamed transfers keep `O(ChunkSize)` memory and any chunk can be decoded alone. A chunk is sent compressed only when the result is strictly smaller; otherwise it goes out raw, so a message may mix compressed and raw chunks.
+- **`HyperionProtocolOptions.CompressionThreshold`** (default 1024, constant `DefaultCompressionThreshold`): messages whose uncompressed length is below it are sent exactly as with compression off.
+- **`HyperionProtocol.IsCompressionSupported`**: `true` on .NET 11 or later outside the browser and WASI, `false` on `net6.0` through `net10.0`. The codec is `System.IO.Compression.ZstandardEncoder` / `ZstandardDecoder`, which ship with .NET 11; no package dependency was added. Where it is `false`, constructing a protocol with `Accept` or `Compress` throws `PlatformNotSupportedException`.
+- **`HyperionProtocol.MaxSupportedProtocolVersion`** (`2`). `ProtocolVersion` stays `1`: it is what uncompressed frames carry and what `HandshakeAsync` advertises by default.
+- **`PacketHeader.Compression`** and **`PacketHeader.RawLength`** (both omitted from the JSON when null) and the constant `PacketHeader.ZstandardCompression` (`"zstd"`).
+- **`HyperionErrorCode.CompressionNotSupported`** (14): a chunk is compressed but this receiver is `Off` (always the case below .NET 11) or the algorithm is unknown; raised from the header, before any payload byte is read or allocated. **`HyperionErrorCode.DecompressionFailed`** (15): the payload is not a valid Zstandard frame or does not expand to exactly `RawLength` bytes. Both leave the connection unusable.
+- **Tests**: `CompressionTests` (byte-identity with 0.4.1 when off, rejection from the header alone on every receive path, round trips on every send and receive path of both protocols, mixed and below-threshold messages, checksum over the on-wire bytes, decompression bomb, `RawLength` bounds, the uniform-chunk rule on uncompressed lengths, a golden hand-written Zstandard frame, timeouts, metrics) and four new `FuzzTests` groups (720 cases) over mutated compressed frames. 1607 tests per framework on `net8.0` through `net10.0`, 1630 on `net11.0`.
+
+### Changed
+- **Receivers accept `Version` 0..2** (was 0..1). `HyperionProtocol.ValidateHeader` checks against `MaxSupportedProtocolVersion`. A version 2 chunk without `Compression` is an ordinary raw chunk and is accepted on every target, including with `ChunkCompression = Off`.
+- **A `Compression` header member is no longer an unknown member.** 0.4.1 and older ignore it and deliver the payload as is; 0.5.0 either decompresses the chunk or rejects it (`CompressionNotSupported`), whatever `Version` the header carries. `RawLength` without `Compression` is ignored.
+- **The uniform-chunk rule, `TotalChunks` and `MaxMessageSize` apply to the uncompressed length** of a chunk (`RawLength` when the chunk is compressed, `DataLength` otherwise). For uncompressed messages nothing changes. `MaxMessageSize` is still enforced from the first header, before any payload byte is read.
+- **`Crc32C` covers the bytes on the wire.** For a compressed chunk that is the Zstandard frame as transmitted, and it is verified before decompression, so corrupted bytes never reach the decoder and surface as `ChecksumMismatch`. For raw chunks this is what it always was.
+- **Metrics, activities and streaming receives report uncompressed sizes**: `hyperion.bytes.sent` / `hyperion.bytes.received` count logical payload bytes and `ReceiveStreamingAsync` yields decompressed chunks. `SendTimeout` and `ReceiveTimeout` still bound transport waits only; time spent in the codec is not counted.
+- **`HyperionProtocolOptions.Validate`** also validates `ChunkCompression` and `CompressionThreshold`.
+- **Buffered receives can now hold more than was transmitted**: a peer may send a highly compressible message whose reassembled size approaches `MaxMessageSize` while transmitting far fewer bytes. Only receivers with `Accept` or `Compress` are affected; size `MaxMessageSize` for the uncompressed message, or use `ReceiveStreamingAsync`, which holds one chunk.
+- Package tags extended (`compression`, `zstd`, `zstandard`).
+
+### Wire format
+- **Protocol version 2** is version 1 plus two optional chunk-header members appended after `Crc32C`: `Compression` (string, the only defined value is `"zstd"`) and `RawLength` (integer, the uncompressed length of the chunk, `1 .. ChunkSize`, required when `Compression` is present). `DataLength` stays the number of bytes on the wire. Lightweight and direct frames are unchanged and never compressed.
+- Every chunk of a message the sender offered to the compressor carries `"Version":2`, including chunks that ended up raw. Every other frame keeps `"Version":1` and is byte-identical to 0.4.1; with `ChunkCompression` at `Off` or `Accept` nothing new is ever emitted.
+- **Compatibility of a compressing sender**: a 0.5.0 receiver on .NET 11 with `Accept` or `Compress` reads the message; a 0.5.0 receiver with `Off` (any target) fails with `CompressionNotSupported`; libraries 0.3.0 through 0.4.1 fail with `UnsupportedVersion` on the first chunk (they ignore unknown header members but reject an unknown version); 0.1.x and 0.2.x do not check the version and must never be sent compressed messages. In the other direction nothing changes: a 0.5.0 receiver reads every frame emitted since 0.1.0.
+- The handshake phase 2 (feature bitmask) that the specification reserved for "protocol version 2" is now reserved for **protocol version 3**. It was never implemented or emitted, so no peer is affected.
+
 ## [0.4.1] - 2026-11-11
 
 ### Added

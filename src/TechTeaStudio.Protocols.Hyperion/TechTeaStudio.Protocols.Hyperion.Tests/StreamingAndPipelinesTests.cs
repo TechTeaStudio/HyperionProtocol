@@ -183,7 +183,7 @@ public class StreamingAndPipelinesTests
     {
         var header = new PacketHeader
         {
-            Version = HyperionProtocol.ProtocolVersion + 5,
+            Version = HyperionProtocol.MaxSupportedProtocolVersion + 1,
             Magic = HyperionProtocol.ProtocolMagic,
             PacketId = Guid.NewGuid(),
             ChunkNumber = 0,

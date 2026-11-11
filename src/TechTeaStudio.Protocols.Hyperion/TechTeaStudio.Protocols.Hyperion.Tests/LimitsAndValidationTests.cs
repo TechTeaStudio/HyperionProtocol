@@ -185,7 +185,7 @@ public class LimitsAndValidationTests
         var h = GoodHeader(); h.Magic = "XXX";
         Expect(h, HyperionErrorCode.InvalidMagic);
 
-        h = GoodHeader(); h.Version = HyperionProtocol.ProtocolVersion + 1;
+        h = GoodHeader(); h.Version = HyperionProtocol.MaxSupportedProtocolVersion + 1;
         Expect(h, HyperionErrorCode.UnsupportedVersion);
 
         h = GoodHeader(); h.TotalChunks = 0;
@@ -279,9 +279,10 @@ public class LimitsAndValidationTests
     public async Task Header_WithUnknownMembers_IsAccepted()
     {
         // Forward compatibility: a newer sender may add members this receiver has never heard of.
+        // ("Compression" was the example here until 0.5.0 defined it; see CompressionTests for what it does now.)
         var payload = Encoding.UTF8.GetBytes("future");
         var frame = Frames.Chunk(
-            Frames.HeaderJson(Guid.NewGuid(), 0, 1, payload.Length, last: true, extraMembers: "\"Compression\":\"zstd\",\"Extensions\":{\"trace\":\"abc\"}"),
+            Frames.HeaderJson(Guid.NewGuid(), 0, 1, payload.Length, last: true, extraMembers: "\"Priority\":\"high\",\"Extensions\":{\"trace\":\"abc\"}"),
             payload);
 
         var result = await new HyperionProtocol(new DefaultSerializer()).ReceiveAsync<string>(new MemoryStream(frame));

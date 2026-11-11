@@ -65,7 +65,7 @@ dotnet add package TechTeaStudio.Protocols.Hyperion
 Or pin a specific version in `.csproj`:
 
 ```xml
-<PackageReference Include="TechTeaStudio.Protocols.Hyperion" Version="0.4.1" />
+<PackageReference Include="TechTeaStudio.Protocols.Hyperion" Version="0.5.0" />
 ```
 
 ## Quick start
@@ -217,6 +217,8 @@ Everything a peer can make you do is bounded by `HyperionProtocolOptions`:
 | `ReceiveTimeout` | off | Idle timeout: how long to wait for the peer to deliver *any* bytes. Restarts whenever data arrives; pauses while your code processes a streamed chunk. |
 | `SendTimeout` | off | How long one chunk write (or the final flush) may take. Protects against a peer that stops reading. |
 | `ChunkChecksum` | `Off` | Per-chunk CRC-32C policy, see below. |
+| `ChunkCompression` | `Off` | Per-chunk Zstandard policy (`Off` / `Accept` / `Compress`), .NET 11 only, see below. |
+| `CompressionThreshold` | 1024 | With `Compress`: messages smaller than this many bytes are sent exactly as with compression off. |
 
 Limits are checked before anything is allocated: a hostile header announcing 2 billion chunks costs the receiver one exception, not 2 GiB. The receiver also enforces the *uniform-chunk rule* (every non-final chunk carries exactly the size of chunk 0), which every sender since 0.1.0 has satisfied, and which is what makes the early size check possible.
 
@@ -233,6 +235,43 @@ var strict  = new HyperionProtocolOptions { ChunkChecksum = ChunkChecksumMode.Re
 
 A receiver verifies any checksum that is present, whatever its own mode, before the chunk reaches your code. `Off` (default) keeps the header byte-identical to 0.3.x. The checksum catches corruption that TCP's 16-bit checksum can miss on long transfers and in storage; it is not a MAC, so use TLS against an active attacker. Lightweight and direct frames rely on the transport.
 
+## Compression (Zstandard, .NET 11)
+
+Chunked frames can carry their payload Zstandard-compressed, chunk by chunk. It is opt-in, and it needs the Zstandard codec that ships with .NET 11, so it is available when the library runs on `net11.0` (not in the browser or on WASI). `HyperionProtocol.IsCompressionSupported` tells you at run time.
+
+```csharp
+// Both ends on .NET 11. The sender compresses, the receiver accepts.
+var sender   = new SmartHyperionProtocol(serializer, new HyperionProtocolOptions { ChunkCompression = ChunkCompressionMode.Compress });
+var receiver = new SmartHyperionProtocol(serializer, new HyperionProtocolOptions { ChunkCompression = ChunkCompressionMode.Accept });
+```
+
+| Mode | Emits compressed chunks | Incoming compressed chunk |
+|---|---|---|
+| `Off` (default) | never | rejected with `CompressionNotSupported`, from the header, before any payload is read |
+| `Accept` | never | decompressed |
+| `Compress` | for messages of `CompressionThreshold` bytes or more | decompressed |
+
+How it behaves:
+
+- **Per chunk, self-contained.** Every chunk is one complete Zstandard frame with no dictionary and no state shared with other chunks. Streaming keeps its `O(ChunkSize)` memory on both sides, and `ReceiveStreamingAsync` yields the uncompressed chunks.
+- **Only when it helps.** A chunk is sent compressed only if the result is strictly smaller; otherwise it goes out raw. Already-compressed data (JPEG, video, archives) costs one attempt per chunk and travels as before. Messages below `CompressionThreshold` are not touched at all.
+- **Chunked frames only.** Lightweight and direct frames are never compressed, so with `SmartHyperionProtocol` over a `Stream` compression starts at 64 KiB.
+- **Checksums cover what is on the wire.** With `ChunkChecksum` on, the CRC-32C is computed over the compressed bytes and verified before decompression.
+- **Limits are about your data.** `MaxMessageSize`, the uniform-chunk rule and the metrics all count uncompressed bytes. The timeouts still measure the transport only.
+
+**It is not negotiated, so you must know your peer.** Turn `Compress` on only towards a peer that runs 0.5.0 or later on .NET 11 with `Accept` or `Compress`. Anything else fails loudly on the first chunk of the first compressed message, and never hands compressed bytes to your serializer:
+
+| Receiver | Result of a compressed message |
+|---|---|
+| 0.5.0+, .NET 11, `Accept` or `Compress` | received |
+| 0.5.0+, `Off` (the only mode below .NET 11) | `CompressionNotSupported` |
+| 0.3.0 to 0.4.1 | `UnsupportedVersion` (compressed messages carry protocol version 2) |
+| 0.2.x and older | not safe: these versions do not check the version; never compress towards them |
+
+Everything else is unaffected: with `Off` or `Accept` the library emits exactly the bytes 0.4.1 emits, and a 0.5.0 receiver in any mode reads everything older senders produce. On `net6.0` through `net10.0` the library behaves as in 0.4.1, and asking for `Accept` or `Compress` there throws `PlatformNotSupportedException` when the protocol is constructed.
+
+Decompression is bounded: a chunk expands into a buffer of exactly the `RawLength` its header announces, which may not exceed `ChunkSize`, and a payload that would expand to anything else is rejected as `DecompressionFailed`. What compression does change is that a peer can fill a buffered receive up to `MaxMessageSize` while sending far fewer bytes, so on a server that accepts compression from untrusted clients set `MaxMessageSize` to what you are willing to hold per connection, or receive with `ReceiveStreamingAsync`.
+
 ## Error handling
 
 Every failure is a `HyperionProtocolException` with a stable `ErrorCode`:
@@ -245,6 +284,8 @@ Every failure is a `HyperionProtocolException` with a stable `ErrorCode`:
 | `MessageTooLarge` | Message exceeds `MaxMessageSize`. | Receive: close. Send: still usable, nothing was written. |
 | `SerializationFailed` | The serializer threw or returned null for a non-nullable type. | Send: still usable. Receive: close. |
 | `InvalidMagic`, `UnsupportedVersion`, `InvalidHeaderLength`, `MalformedHeader`, `InvalidChunkCount`, `InvalidChunkNumber`, `InvalidDataLength`, `EndFlagMismatch`, `PacketIdMismatch`, `ChunkOutOfOrder`, `ChecksumMismatch`, `ChecksumMissing` | The peer sent a frame this receiver does not accept. | Close. |
+| `CompressionNotSupported` | The peer sent a compressed chunk but `ChunkCompression` is `Off` here (always so below .NET 11), or the algorithm is unknown. Detected from the header. | Close, and fix the configuration: the sender must not compress towards this peer. |
+| `DecompressionFailed` | A compressed chunk is not a valid Zstandard frame or does not expand to exactly its announced `RawLength`. | Close. |
 | `HandshakeFailed` | Bad magic, unsupported version, or connection lost during `HandshakeAsync`. | Close. |
 | `SendFailed`, `ReceiveFailed` | Transport I/O error; see `InnerException`. | Close. |
 
@@ -349,15 +390,15 @@ Send a `List<T>` as one message and let the serializer do the work, or write sev
 
 ### Compression
 
-Compress between serializer and framing, where you know the data: wrap your `ISerializer` with `BrotliStream` or a zstd binding, and cap the decompressed size on the receiver. The framing layer never decompresses, so it can never be the source of a decompression bomb.
+On .NET 11, with both ends under your control, use the built-in per-chunk Zstandard: see [Compression (Zstandard, .NET 11)](#compression-zstandard-net-11). On older targets, for another algorithm, or when only some message types should be compressed, compress between serializer and framing, where you know the data: wrap your `ISerializer` with `BrotliStream` or a zstd binding, and cap the decompressed size on the receiver. With `ChunkCompression` at its default `Off` the framing layer never decompresses, so it cannot be the source of a decompression bomb.
 
 ### Resource limits
 
-Per connection the receiver holds at most `MaxMessageSize` (buffered) or `ChunkSize` (streamed) of payload plus bytes actually received; `ReceiveTimeout` bounds how long a stalled peer can hold that. Per-process limits (connection count, per-peer message rate) belong to the host's accept loop.
+Per connection the receiver holds at most `MaxMessageSize` (buffered) or `ChunkSize` (streamed) of payload plus bytes actually received; `ReceiveTimeout` bounds how long a stalled peer can hold that. With compression accepted, a buffered receive can reach `MaxMessageSize` on far fewer transmitted bytes, so that limit is the one to size. Per-process limits (connection count, per-peer message rate) belong to the host's accept loop.
 
 ## Protocol version negotiation
 
-`PacketHeader.Version` is part of every chunked frame; the validator accepts versions in `[MinSupportedProtocolVersion .. ProtocolVersion]` (currently `0..1`, with `0` treated as legacy v1 from 0.2.x senders). An optional handshake helper exchanges a magic preamble plus version on connection and returns the minimum both sides agree to speak:
+`PacketHeader.Version` is part of every chunked frame; the validator accepts versions in `[MinSupportedProtocolVersion .. MaxSupportedProtocolVersion]` (currently `0..2`, with `0` treated as legacy v1 from 0.2.x senders). `ProtocolVersion` (`1`) is what the library emits for every uncompressed message and what the handshake advertises by default; version 2 appears only on messages sent with `ChunkCompression = Compress`. An optional handshake helper exchanges a magic preamble plus version on connection and returns the minimum both sides agree to speak:
 
 ```csharp
 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -368,7 +409,7 @@ if (version < HyperionProtocol.ProtocolVersion)
 }
 ```
 
-New optional header members (such as `Crc32C`) never bump the version: receivers ignore what they don't know. The version moves only when a frame would become unreadable to an older peer, and the handshake is reserved to grow a feature-negotiation phase for version 2. The full policy, including deprecation rules, is in [docs/SPECIFICATION.md](docs/SPECIFICATION.md#7-versioning-and-compatibility-policy).
+New optional header members that are harmless to ignore (such as `Crc32C`) never bump the version: receivers ignore what they don't know. The version moves only when a frame would become unreadable to an older peer, which is why compressed messages are version 2 while everything else stays version 1. The handshake does not negotiate compression; it is reserved to grow a feature-negotiation phase for version 3. The full policy, including deprecation rules, is in [docs/SPECIFICATION.md](docs/SPECIFICATION.md#7-versioning-and-compatibility-policy).
 
 ## Wire format
 
@@ -383,6 +424,12 @@ Chunked frame (HyperionProtocol & SmartHyperionProtocol fallback):
 Header (JSON; "Crc32C" only when checksums are on, unknown members ignored):
   { "Version":1, "Magic":"TTS", "PacketId":"<guid>",
     "ChunkNumber":0, "TotalChunks":5, "DataLength":1048576, "Flags":0, "Crc32C":910901175 }
+
+Header of a compressed chunk (version 2; the payload is one Zstandard frame of DataLength bytes
+that expands to RawLength bytes, and "Crc32C" covers the compressed bytes):
+  { "Version":2, "Magic":"TTS", "PacketId":"<guid>",
+    "ChunkNumber":0, "TotalChunks":5, "DataLength":18734, "Flags":0, "Crc32C":2868463187,
+    "Compression":"zstd", "RawLength":1048576 }
 
 Smart-mode framing for small messages skips the JSON header entirely:
 
@@ -402,8 +449,10 @@ The complete, normative description is in [docs/SPECIFICATION.md](docs/SPECIFICA
 public class HyperionProtocol
 {
     public const string ProtocolMagic = "TTS";
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 1;              // emitted for uncompressed messages, advertised by the handshake
+    public const int MaxSupportedProtocolVersion = 2;  // accepted; 2 = compressed chunks
     public const int MinSupportedProtocolVersion = 0;
+    public static bool IsCompressionSupported { get; } // true on .NET 11+ outside browser/WASI
 
     public HyperionProtocol(ISerializer serializer);
     public HyperionProtocol(ISerializer serializer, HyperionProtocolOptions options);
@@ -455,6 +504,7 @@ public sealed class HyperionProtocolOptions
     public const int DefaultChunkSize = 1024 * 1024;
     public const int DefaultMaxHeaderLength = 64 * 1024;
     public const long DefaultMaxMessageSize = 1024L * 1024 * 1024;
+    public const int DefaultCompressionThreshold = 1024;
 
     public int ChunkSize { get; init; } = DefaultChunkSize;
     public int MaxHeaderLength { get; init; } = DefaultMaxHeaderLength;
@@ -462,9 +512,12 @@ public sealed class HyperionProtocolOptions
     public TimeSpan? ReceiveTimeout { get; init; }
     public TimeSpan? SendTimeout { get; init; }
     public ChunkChecksumMode ChunkChecksum { get; init; } = ChunkChecksumMode.Off;
+    public ChunkCompressionMode ChunkCompression { get; init; } = ChunkCompressionMode.Off;
+    public int CompressionThreshold { get; init; } = DefaultCompressionThreshold;
 }
 
 public enum ChunkChecksumMode { Off, Emit, Required }
+public enum ChunkCompressionMode { Off, Accept, Compress }
 
 public class HyperionProtocolException : Exception
 {
@@ -479,13 +532,15 @@ public enum HyperionErrorCode
 {
     Unspecified, InvalidMagic, UnsupportedVersion, InvalidHeaderLength, MalformedHeader, InvalidChunkCount,
     InvalidChunkNumber, InvalidDataLength, EndFlagMismatch, PacketIdMismatch, ChunkOutOfOrder, MessageTooLarge,
-    ChecksumMismatch, ChecksumMissing, PeerClosed, UnexpectedEndOfStream, Timeout, HandshakeFailed,
+    ChecksumMismatch, ChecksumMissing, CompressionNotSupported, DecompressionFailed,
+    PeerClosed, UnexpectedEndOfStream, Timeout, HandshakeFailed,
     SerializationFailed, SendFailed, ReceiveFailed,
 }
 
 public sealed class PacketHeader
 {
     public const byte EndFlag = 0x01;
+    public const string ZstandardCompression = "zstd";
     public int Version { get; set; }
     public string Magic { get; set; }
     public Guid PacketId { get; set; }
@@ -494,6 +549,8 @@ public sealed class PacketHeader
     public int DataLength { get; set; }
     public byte Flags { get; set; }
     public uint? Checksum { get; set; }   // serialized as "Crc32C", omitted when null
+    public string? Compression { get; set; }  // "zstd" on a compressed chunk, omitted when null
+    public int? RawLength { get; set; }       // uncompressed length of a compressed chunk, omitted when null
     public bool IsLastChunk { get; }
 }
 
@@ -566,11 +623,12 @@ HyperionProtocol/
 │   │   ├── Protocols/ChunkData.cs
 │   │   ├── ISerializer.cs / DefaultSerializer.cs
 │   │   ├── PacketHeader.cs / HyperionJsonContext.cs  <- header + source-generated JSON
-│   │   ├── HyperionProtocolOptions.cs / ChunkChecksumMode.cs
+│   │   ├── HyperionProtocolOptions.cs / ChunkChecksumMode.cs / ChunkCompressionMode.cs
+│   │   ├── ZstdCodec.cs                              <- Zstandard per chunk; the only file with a .NET 11 guard
 │   │   ├── HyperionProtocolException.cs / HyperionErrorCode.cs
 │   │   ├── Crc32C.cs / OperationGuard.cs / HyperionDiagnostics.cs
 │   │   └── ProtocolStats.cs
-│   ├── TechTeaStudio.Protocols.Hyperion.Tests/       <- NUnit (correctness, limits, checksums, timeouts, fuzz, TLS, telemetry, perf, stress)
+│   ├── TechTeaStudio.Protocols.Hyperion.Tests/       <- NUnit (correctness, limits, checksums, compression, timeouts, fuzz, TLS, telemetry, perf, stress)
 │   ├── TechTeaStudio.Protocols.Hyperion.Benchmarks/  <- BenchmarkDotNet console app
 │   └── ConsoleTestApp/                                <- smoke test
 ├── .github/workflows/dotnet.yml                       <- CI publish (shared TTS workflow)

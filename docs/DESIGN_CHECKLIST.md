@@ -13,7 +13,10 @@ in this library", says which layer owns it and how to wire it up.
 | 🟡 Partial | Partly covered; the remaining piece is named and on the roadmap. |
 | 📋 Planned | Designed in the specification, not implemented yet. |
 
-**Score:** 50 items reviewed. 28 built in, 16 delegated with a recipe, 5 partial, 1 planned.
+**Score:** 50 items reviewed. 29 built in, 15 delegated with a recipe, 5 partial, 1 planned.
+
+Updated for 0.5.0: item 36 (compression) moved from delegated to built in, and the handshake
+extension that items 27, 28 and 32 refer to is now reserved for protocol version 3.
 
 ## Architecture
 
@@ -65,12 +68,12 @@ in this library", says which layer owns it and how to wire it up.
 
 | # | Item | Status | How Hyperion handles it | Where |
 |---|---|---|---|---|
-| 27 | Handshake | ✅ Built in | Optional `HandshakeAsync`: 8-byte exchange (`"TTSH"` + version), both peers write first then read, negotiated version is the minimum. Phase 2 (feature bitmask) is reserved for version 2. | `HyperionProtocol.HandshakeAsync`; SPECIFICATION §6 |
-| 28 | Heartbeat | 🟡 Partial | No ping/pong frames in version 1 (they would need a new frame type and negotiation). Liveness today: TCP keep-alive (item 29) plus `ReceiveTimeout`, and an application-level ping message when needed. Control frames are the first item on the version-2 roadmap. | DESIGN §7 |
+| 27 | Handshake | ✅ Built in | Optional `HandshakeAsync`: 8-byte exchange (`"TTSH"` + version), both peers write first then read, negotiated version is the minimum. Phase 2 (feature bitmask) is reserved for version 3. | `HyperionProtocol.HandshakeAsync`; SPECIFICATION §6 |
+| 28 | Heartbeat | 🟡 Partial | No ping/pong frames in versions 1 and 2 (they would need a new frame type and negotiation). Liveness today: TCP keep-alive (item 29) plus `ReceiveTimeout`, and an application-level ping message when needed. Control frames are the first item on the version-3 roadmap. | DESIGN §7 |
 | 29 | Keep-Alive | 🧩 Delegated | TCP keep-alive on the socket: `socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true)` plus `TcpKeepAliveTime` / `TcpKeepAliveInterval` / `TcpKeepAliveRetryCount` (.NET 5+). Detects dead peers without any protocol traffic. | README "Keep-alive and heartbeats" |
 | 30 | Reconnection | 🧩 Delegated | Policy (backoff, jitter, max attempts) is the application's; the library makes it cheap: protocol objects are stateless and reusable, every failure says whether the connection is still usable, and the handshake can be re-run. A session helper with a built-in policy is on the roadmap. | README "Reconnection"; DESIGN §7 |
 | 31 | Session Resume | 🧩 Delegated | There is no session identity on the wire; nothing to resume at this layer. For transfers, resume is an application offset: `SendStreamingAsync` from a file position, `ReceiveStreamingAsync` appending. | README "Working with large payloads" |
-| 32 | Graceful Shutdown | 🟡 Partial | Half-close at a message boundary is recognised and reported as `PeerClosed` (normal end of session, nothing lost); mid-frame closure is reported separately. Recipe: finish the last send, `Socket.Shutdown(SocketShutdown.Send)`, drain receives until `PeerClosed`. An explicit CLOSE / GOAWAY control frame is part of the version-2 control frames. | `HyperionErrorCode.PeerClosed`; README "Graceful shutdown" |
+| 32 | Graceful Shutdown | 🟡 Partial | Half-close at a message boundary is recognised and reported as `PeerClosed` (normal end of session, nothing lost); mid-frame closure is reported separately. Recipe: finish the last send, `Socket.Shutdown(SocketShutdown.Send)`, drain receives until `PeerClosed`. An explicit CLOSE / GOAWAY control frame is part of the version-3 control frames. | `HyperionErrorCode.PeerClosed`; README "Graceful shutdown" |
 
 ## Performance
 
@@ -79,8 +82,8 @@ in this library", says which layer owns it and how to wire it up.
 | 33 | Backpressure | ✅ Built in | Pipelines path: native `PipeWriter`/`PipeReader` backpressure. Stream path: the TCP window, with `SendTimeout` bounding a stalled peer. Streaming receive yields one bounded chunk at a time and the idle timer pauses while the consumer works, so a slow consumer slows the producer instead of overflowing memory. | Pipelines API; `ReceiveStreamingAsync`; `OperationGuard` |
 | 34 | Buffer Management | ✅ Built in | `ArrayPool` for headers, frames and the streaming send buffer; header + small payload coalesced into one write; source-generated JSON for headers (no reflection on the hot path); payload arrays sized exactly from validated lengths; streaming paths never hold a whole message. | `HyperionProtocol.SendChunkAsync`, `HyperionJsonContext` |
 | 35 | Batching | 🧩 Delegated | No automatic batching: the framing layer cannot know which messages may be delayed. Recipe: send a `List<T>` as one message (the serializer handles it), or use the `PipeWriter` overload and let the pipe coalesce writes. The adaptive framing already keeps per-message overhead at 3 bytes, which removes the main reason to batch. | README "Batching" |
-| 36 | Compression | 🧩 Delegated | Not in version 1: payload compression belongs between serializer and framing, where the application knows the data. Recipe: wrap `ISerializer` with `BrotliStream`/`ZstdNet` and cap the decompressed size. A negotiated `Encoding` header member is on the version-2 roadmap. | README "Compression"; DESIGN §7 |
-| 37 | Resource Limits | ✅ Built in | Per connection: at most `MaxMessageSize` buffered (default 1 GiB), `ChunkSize` in flight when streaming, `MaxHeaderLength` per header, plus time limits. Receiver memory is bounded by bytes actually received plus `MaxMessageSize`; a hostile header cannot trigger a large allocation. | `HyperionProtocolOptions`; SPECIFICATION §10 |
+| 36 | Compression | ✅ Built in | Opt-in per-chunk Zstandard on .NET 11 (`ChunkCompression`: `Off` / `Accept` / `Compress`, `CompressionThreshold`), off by default. Each chunk is an independent frame, sent compressed only if smaller. Not negotiated: compressed messages carry `Version: 2` and peers that cannot read them fail on the first chunk. Decompression is bounded by `RawLength <= ChunkSize` and `MaxMessageSize`. Below .NET 11, or for other algorithms, the recipe stands: wrap `ISerializer` and cap the decompressed size. | `HyperionProtocolOptions.ChunkCompression`; SPECIFICATION §4.1.3, §10; `CompressionTests` |
+| 37 | Resource Limits | ✅ Built in | Per connection: at most `MaxMessageSize` buffered (default 1 GiB), `ChunkSize` in flight when streaming, `MaxHeaderLength` per header, plus time limits. Receiver memory is bounded by bytes actually received plus `MaxMessageSize`; a hostile header cannot trigger a large allocation. With compression accepted, a buffered receive can reach `MaxMessageSize` on far fewer transmitted bytes. | `HyperionProtocolOptions`; SPECIFICATION §10 |
 | 38 | Concurrency Limits | 🟡 Partial | Thread-safety contract: one instance for any number of connections and threads; per connection at most one sender and one receiver at a time (frames would interleave otherwise). Connection-count limits are the host's job (accept loop with a `SemaphoreSlim`). A send-serialising session helper is on the roadmap. | README "Concurrency"; DESIGN §7 |
 
 ## Compatibility
@@ -101,15 +104,15 @@ in this library", says which layer owns it and how to wire it up.
 | 45 | Metrics | ✅ Built in | `System.Diagnostics.Metrics` meter `TechTeaStudio.Protocols.Hyperion`: messages, bytes and frames sent/received (tagged by framing mode) and errors (tagged by code and direction). Zero cost without a listener. | `HyperionDiagnostics`; `DiagnosticsTests` |
 | 46 | Tracing | ✅ Built in | `ActivitySource` with one `Hyperion.Send` (Producer) / `Hyperion.Receive` (Consumer) activity per message, tagged with mode, size and frame count, error status on failure. Context propagation across the wire is an application envelope concern (item 12). | `HyperionDiagnostics`; `DiagnosticsTests` |
 | 47 | Error Codes | ✅ Built in | `HyperionErrorCode`: 21 stable, documented codes with connection-usability semantics; exceptions print as `[Code] message`. | `HyperionErrorCode`; SPECIFICATION §8 |
-| 48 | Fuzz Testing | ✅ Built in | Deterministic, seed-driven fuzz suite (750 cases): random garbage, garbage with plausible prefixes, mutated valid frames, truncated frames, and a checksum oracle (a corrupted payload is never returned). Oracle: every receiver either returns a payload or throws `HyperionProtocolException`, never anything else, never hangs. Coverage-guided fuzzing (SharpFuzz) is a reasonable next step. | `FuzzTests` |
+| 48 | Fuzz Testing | ✅ Built in | Deterministic, seed-driven fuzz suite (1470 cases): random garbage, garbage with plausible prefixes, mutated valid frames, mutated compressed frames and Zstandard payloads, truncated frames, and a checksum oracle (a corrupted payload is never returned). Oracle: every receiver either returns a payload or throws `HyperionProtocolException`, never anything else, never hangs. Coverage-guided fuzzing (SharpFuzz) is a reasonable next step. | `FuzzTests` |
 | 49 | Load Testing | ✅ Built in | NUnit `Performance` and `Stress` categories (throughput floors, 100 concurrent clients, sustained small-message load) and a BenchmarkDotNet project (throughput, latency, concurrency, checksum cost). | `PerformanceAndStressTests`; Benchmarks project |
 | 50 | Chaos Testing | 🟡 Partial | Fault injection is tested in-process: peer silent, peer stalls mid-frame, connection dropped at every frame position, reader completing a pipe, socket closed under a writer, slow consumer. Network-level chaos (latency, loss, partition via toxiproxy or `tc netem`) is not automated. | `TimeoutAndDisconnectTests`; `FuzzTests` |
 
 ## Reading the result
 
-The 16 delegated items are not omissions; they are the layer boundaries that keep the library at a
+The 15 delegated items are not omissions; they are the layer boundaries that keep the library at a
 few files. Every one of them has a recipe in the README so that a team adopting Hyperion knows
 exactly what they still have to decide. The 5 partial items and the planned feature negotiation all
 converge on the same two pieces of work: a session helper above the protocol, and control frames
-negotiated by the version-2 handshake. Both are designed in the specification and neither requires
-touching the version-1 frames.
+negotiated by the version-3 handshake. Both are designed in the specification and neither requires
+touching the existing frames.

@@ -11,7 +11,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>TechTeaStudio.Protocols.Hyperion</PackageId>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <Authors>Ronald Ryan</Authors>
     <Company>Tech Tea Studio</Company>
     <Description>High-performance chunked TCP messaging protocol for .NET. Pluggable serialization, adaptive lightweight/direct/chunked modes, and async/await with cancellation.</Description>
@@ -22,6 +22,8 @@
     <Copyright>Copyright © Tech Tea Studio 2026</Copyright>
 
     <PackageReleaseNotes>
+v0.5.0 - Opt-in per-chunk Zstandard compression of chunked frames on .NET 11: HyperionProtocolOptions.ChunkCompression (Off / Accept / Compress) and CompressionThreshold. Off by default, and with it off the wire format is byte-identical to 0.4.x on every target. Compressed messages carry protocol version 2 and need a 0.5.0 peer on .NET 11 with compression enabled; older or Off peers reject them loudly. New error codes CompressionNotSupported and DecompressionFailed.
+
 v0.4.1 - Added the net11.0 target. No API or wire format changes.
 
 v0.4.0 - Protocol design review: hard limits, timeouts, integrity, error codes, telemetry, streaming send, Stream/TLS support.
@@ -46,7 +48,7 @@ Wire format: unchanged and backward compatible with 0.1.x-0.3.x. The optional "C
 Full changelog: https://github.com/TechTeaStudio/HyperionProtocol/blob/main/CHANGELOG.md
     </PackageReleaseNotes>
 
-    <PackageTags>network;protocol;tcp;sockets;client-server;communication;serialization;async;high-performance;lightweight;framing;chunking;streaming;pipelines;crc32c;TechTeaStudio</PackageTags>
+    <PackageTags>network;protocol;tcp;sockets;client-server;communication;serialization;async;high-performance;lightweight;framing;chunking;streaming;pipelines;crc32c;compression;zstd;zstandard;TechTeaStudio</PackageTags>
 
   </PropertyGroup>
 

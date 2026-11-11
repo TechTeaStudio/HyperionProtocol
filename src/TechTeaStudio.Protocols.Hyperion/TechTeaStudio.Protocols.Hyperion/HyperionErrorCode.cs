@@ -58,6 +58,19 @@ public enum HyperionErrorCode
     /// <summary>The header carries no checksum but <see cref="HyperionProtocolOptions.ChunkChecksum"/> is <see cref="ChunkChecksumMode.Required"/>.</summary>
     ChecksumMissing = 13,
 
+    /// <summary>
+    /// A chunk carries <see cref="PacketHeader.Compression"/> but this receiver does not decompress:
+    /// <see cref="HyperionProtocolOptions.ChunkCompression"/> is <see cref="ChunkCompressionMode.Off"/> (always the case
+    /// below .NET 11), or the algorithm is not <c>"zstd"</c>. Raised from the header, before any payload byte is read.
+    /// </summary>
+    CompressionNotSupported = 14,
+
+    /// <summary>
+    /// A compressed chunk's payload is not a valid Zstandard frame, or does not decompress to exactly
+    /// <see cref="PacketHeader.RawLength"/> bytes. This is also the guard against decompression bombs.
+    /// </summary>
+    DecompressionFailed = 15,
+
     // --- Connection / transport -----------------------------------------------------------------
 
     /// <summary>
